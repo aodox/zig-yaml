@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: © 2026 Jeffrey C. Ollie <jeff@ocjtech.us>
+# SPDX-License-Identifier: MIT
+
+.zig-cache/
+zig-out/
+zig-pkg/
+
+# The symlink `nix build` leaves behind.
+/result
+
+# Where tools/fuzz.zig writes an input that failed, to be fed back with
+# `--input`.
+/fuzz-findings/

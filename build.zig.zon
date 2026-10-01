@@ -1,0 +1,22 @@
+.{
+    .name = .zig_yaml,
+    .version = "0.0.0",
+    .fingerprint = 0x225b4a6793da2037, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        // The conformance data only; nothing in the library needs it, so it is
+        // lazy and a consumer of this package never fetches it.
+        .yaml_test_suite = .{
+            .url = "https://github.com/yaml/yaml-test-suite/archive/refs/tags/data-2022-01-17.tar.gz",
+            .hash = "N-V-__8AANRsAQDW5NhaTJne--X37O2KNP_maPss14w82QAh",
+            .lazy = true,
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "LICENSES",
+        "README.md",
+    },
+}
