@@ -13,6 +13,39 @@ The API documentation is generated from the doc comments. CI publishes it
 from `main` to <https://jeff.jcollie.page/zig-yaml/>, and
 `zig build docs-serve` serves the same documentation locally.
 
+## Where this lives
+
+The repository lives in three places, all carrying the same history. The
+Forgejo instance at <https://git.jcollie.dev/jeff/zig-yaml> is the one with a
+web interface:
+
+```console
+$ git clone https://git.jcollie.dev/jeff/zig-yaml.git
+```
+
+It is mirrored on Tangled at <https://tangled.org/jcollie.dev/zig-yaml>. It is
+also on the Radicle network, with the repository ID
+
+```
+rad:z2vTvxxTzoSo75cpepS4VFqUFo8x3
+```
+
+and `rad clone rad:z2vTvxxTzoSo75cpepS4VFqUFo8x3` fetches it from any node that
+seeds it. Each of the three holds the whole project.
+
+## Adding it to a project
+
+```console
+$ zig fetch --save git+https://git.jcollie.dev/jeff/zig-yaml.git
+```
+
+then, in `build.zig`:
+
+```zig
+const yaml = b.dependency("zig_yaml", .{ .target = target, .optimize = optimize });
+exe.root_module.addImport("yaml", yaml.module("yaml"));
+```
+
 ## Using it
 
 If you know `std.json`, you already know most of this API.
