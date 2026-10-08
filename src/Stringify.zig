@@ -578,11 +578,11 @@ pub fn write(self: *Stringify, v: anytype) Error!void {
         .enum_literal => return self.writeString(@tagName(v)),
         .@"enum" => |info| {
             if (comptime std.meta.hasFn(T, "yamlStringify")) return v.yamlStringify(self);
-            if (!info.is_exhaustive) {
-                inline for (info.fields) |field| {
-                    if (v == @field(T, field.name)) return self.writeString(field.name);
+            if (info.mode == .nonexhaustive) {
+                inline for (info.field_names) |name| {
+                    if (v == @field(T, name)) return self.writeString(name);
                 }
-                return self.write(@intFromEnum(v));
+                return self.write(@backingInt(v));
             }
             return self.writeString(@tagName(v));
         },
@@ -606,16 +606,16 @@ pub fn write(self: *Stringify, v: anytype) Error!void {
             if (comptime std.meta.hasFn(T, "yamlStringify")) return v.yamlStringify(self);
             if (info.is_tuple) {
                 try self.beginSequence();
-                inline for (info.fields) |field| try self.write(@field(v, field.name));
+                inline for (info.field_names) |name| try self.write(@field(v, name));
                 return self.endSequence();
             }
             try self.beginMapping();
-            inline for (info.fields) |field| {
-                const skip = field.type == void or
-                    (@typeInfo(field.type) == .optional and !self.options.emit_null_optional_fields and @field(v, field.name) == null);
+            inline for (info.field_names, info.field_types) |name, F| {
+                const skip = F == void or
+                    (@typeInfo(F) == .optional and !self.options.emit_null_optional_fields and @field(v, name) == null);
                 if (!skip) {
-                    try self.writeString(field.name);
-                    try self.write(@field(v, field.name));
+                    try self.writeString(name);
+                    try self.write(@field(v, name));
                 }
             }
             return self.endMapping();

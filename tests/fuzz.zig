@@ -19,9 +19,9 @@
 //!
 //! Each target is an ordinary test as well as a fuzz target: without
 //! `--fuzz` it runs its seeds, so `zig build test` checks the same properties
-//! on input that has already been interesting once. `tools/fuzz.zig` drives
-//! them with made-up input, since Zig 0.16.0's own fuzzer has no coverage
-//! feedback; `flake.nix` says why.
+//! on input that has already been interesting once. `zig build fuzz --fuzz`
+//! runs them under Zig's own coverage-guided fuzzer, and `tools/fuzz.zig`
+//! drives them with mutations of the yaml-test-suite.
 
 const builtin = @import("builtin");
 const std = @import("std");

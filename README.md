@@ -5,7 +5,7 @@ SPDX-License-Identifier: MIT
 
 # zig-yaml
 
-A YAML 1.2.2 parser and emitter for Zig 0.16, with the same shape as
+A YAML 1.2.2 parser and emitter for Zig 0.17, with the same shape as
 `std.json`. The parser is built directly on the grammar of the YAML 1.2.2
 specification [1]. It passes every case of the yaml-test-suite [2].
 
@@ -45,6 +45,15 @@ then, in `build.zig`:
 const yaml = b.dependency("zig_yaml", .{ .target = target, .optimize = optimize });
 exe.root_module.addImport("yaml", yaml.module("yaml"));
 ```
+
+`main` needs Zig 0.17.0. For Zig 0.16.0, use the `zig-0.16` branch, which
+holds the last of zig-yaml to build with it:
+
+```console
+$ zig fetch --save git+https://git.jcollie.dev/jeff/zig-yaml.git#zig-0.16
+```
+
+The `v0.1.0` tag is the same commit.
 
 ## Using it
 
@@ -209,6 +218,7 @@ $ zig build test                       # unit tests and the whole yaml-test-suit
 $ zig build test -Dsuite-filter=9KAX   # one suite case, with details on failure
 $ zig build events -- file.yaml        # events for a file, in the suite's notation
 $ zig build fuzz-run -- --seconds 600  # fuzz every target for ten minutes each
+$ zig build fuzz --fuzz                # Zig's own fuzzer, until interrupted
 ```
 
 The yaml-test-suite [2] is a lazy dependency, so a project that depends on
@@ -224,9 +234,12 @@ this package never fetches it. The suite runner checks every case three ways:
 All 402 cases pass. That covers 94 invalid inputs rejected, 279 JSON
 comparisons and 308 round trips.
 
-`tests/fuzz.zig` holds the fuzzing properties, and `tools/fuzz.zig` drives
-them with mutated inputs seeded from the test suite. Zig 0.16.0's own fuzzer
-has no coverage feedback; `flake.nix` explains why. The properties are:
+`tests/fuzz.zig` holds the fuzzing properties. Two fuzzers drive them.
+`zig build fuzz --fuzz` is Zig's own, which is guided by coverage; the test
+binaries are compiled with LLVM because the self-hosted backend emits no
+coverage instrumentation. `tools/fuzz.zig` is a loop of our own with no
+coverage, which mutates inputs seeded from the test suite instead. The
+properties are:
 
 - Any input either fails or round-trips.
 - Any generated `Value` tree round-trips through `Stringify`.
@@ -237,12 +250,12 @@ on every push.
 
 ## Building
 
-The development shell in `flake.nix` provides Zig 0.16, `reuse`,
+The development shell in `flake.nix` provides Zig 0.17, `reuse`,
 `git-pages-cli` and `zon2nix`. `build.zig.zon.nix` is generated from
 `build.zig.zon`. When a dependency changes, regenerate it with:
 
 ```console
-$ nix develop -c zon2nix --16 --nix=build.zig.zon.nix build.zig.zon
+$ nix develop -c zon2nix --17 --nix=build.zig.zon.nix build.zig.zon
 ```
 
 CI fetches the Zig dependencies through Nix, from the `zig-deps` flake

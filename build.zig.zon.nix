@@ -5,7 +5,7 @@
   fetchurl,
   fetchzip,
   runCommandLocal,
-  zig_0_16,
+  zig_0_17,
   zstd,
   name ? "zig-packages",
   # Accepted and ignored. Expressions from zon2nix before 0.8 built the
@@ -46,13 +46,9 @@ let
     };
   };
 
-  # The packages whose own manifest declares a dependency by `.path`. Zig
-  # 0.16.0 cannot build these through `zig build --system`: it spins in
-  # userspace forever, because a `.path` dependency's hash is computed against
-  # the system package directory during the fetch and against the real global
-  # cache afterwards, and in that mode the two disagree. A package that wants
-  # `--system` copies each of these into its build root and passes `--fork=`;
-  # see the README.
+  # The packages whose own manifest declares a dependency by `.path`, which
+  # Zig 0.16.0 cannot build through `zig build --system`. Listed here too so
+  # that every version's expression offers the same things; see the README.
   pathDependencyPackages = [
   ];
 in
@@ -69,28 +65,31 @@ in
 # the start, without a second copy of everything.
 runCommandLocal name
   {
-    nativeBuildInputs = [ zig_0_16 ];
+    nativeBuildInputs = [ zig_0_17 ];
     passthru = { inherit pathDependencyPackages; };
   }
   ''
     mkdir "$out"
 
-    # Each package gets a directory of its own to work in, since `zig fetch`
-    # leaves what it unpacked in `zig-pkg/` under the directory it ran in.
+    # Zig 0.17 runs `zig fetch` in a build runner it compiles into the global
+    # cache the first time, which takes a minute or more. Every package shares
+    # one cache, then, and it is compiled once here before they are fetched
+    # several at a time, rather than by each of them at once.
+    export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/cache"
+    mkdir -p "$ZIG_GLOBAL_CACHE_DIR"
+    zig fetch --help >/dev/null
+
+    # Without `--save`, which wants a project to save into, Zig 0.17 unpacks
+    # nothing where it can be found: what it keeps is `p/<hash>.tar.gz` in
+    # the global cache, the package filtered by its manifest's `.paths` under
+    # a single directory named by its hash. Unpacking that gives the
+    # directory `zig build --system` wants.
     unpack() {
       local work="$TMPDIR/work/$1"
-      mkdir -p "$work/src" "$work/cache/tmp"
-      # workaround https://codeberg.org/ziglang/zig/issues/31866
-      # https://github.com/Cloudef/zig2nix/issues/54
-      touch "$work/src/build.zig"
-      # `zig fetch` recompresses every package into `p/` at gzip level 9 for
-      # its own cache, which is nearly all of its time and of no use here.
-      # With `p` a file rather than a directory that step fails at once --
-      # Zig warns, and carries on -- and the package is left in `zig-pkg/`.
-      touch "$work/cache/p"
+      mkdir -p "$work"
 
       local hash
-      if ! hash="$(cd "$work/src" && zig fetch --global-cache-dir "$work/cache" "$2" 2>"$work/log")"; then
+      if ! hash="$(cd "$work" && zig fetch "$2" 2>"$work/log")"; then
         cat "$work/log" >&2
         return 1
       fi
@@ -98,15 +97,18 @@ runCommandLocal name
         echo "$2 is $hash to Zig, not $1" >&2
         return 1
       fi
-      mv "$work/src/zig-pkg/$1" "$out/$1"
+      tar -xzf "$ZIG_GLOBAL_CACHE_DIR/p/$1.tar.gz" -C "$out"
+      rm -f "$ZIG_GLOBAL_CACHE_DIR/p/$1.tar.gz"
       rm -rf "$work"
     }
     export -f unpack
 
     # Several at a time: `zig fetch` spends most of a package on one core.
+    # `-r` because otherwise xargs runs `unpack` once, with no arguments, when
+    # there are no packages at all, and the build fails.
     cores="''${NIX_BUILD_CORES:-0}"
     if [ "$cores" -le 0 ]; then cores="$(nproc)"; fi
-    xargs -P "$cores" -n 2 bash -c 'unpack "$@"' unpack <<'EOF'
+    xargs -r -P "$cores" -n 2 bash -c 'unpack "$@"' unpack <<'EOF'
     ${lib.concatStrings (lib.mapAttrsToList (hash: src: "${hash} ${src}\n") packages)}
     EOF
   ''

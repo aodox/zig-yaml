@@ -60,7 +60,7 @@ pub const Value = union(enum) {
     };
 
     fn hashString(h: *std.hash.Wyhash, s: []const u8) void {
-        h.update(&.{@intFromEnum(std.meta.Tag(Value).string)});
+        h.update(&.{@backingInt(std.meta.Tag(Value).string)});
         h.update(s);
     }
 
@@ -73,7 +73,7 @@ pub const Value = union(enum) {
     fn hashInto(v: Value, h: *std.hash.Wyhash) void {
         switch (v) {
             .string => |s| return hashString(h, s),
-            else => h.update(&.{@intFromEnum(std.meta.activeTag(v))}),
+            else => h.update(&.{@backingInt(std.meta.activeTag(v))}),
         }
         switch (v) {
             .null, .string => {},

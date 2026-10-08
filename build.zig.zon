@@ -1,8 +1,8 @@
 .{
     .name = .zig_yaml,
-    .version = "0.1.0",
+    .version = "0.2.0",
     .fingerprint = 0x225b4a6793da2037, // Changing this has security and trust implications.
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         // The conformance data only; nothing in the library needs it, so it is
         // lazy and a consumer of this package never fetches it.

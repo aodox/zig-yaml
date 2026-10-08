@@ -287,16 +287,16 @@ pub fn innerParse(comptime T: type, allocator: Allocator, source: anytype, optio
             // A bare scalar naming a variant with no payload.
             if (try source.peekNextEventType() == .scalar) {
                 const s = try nextScalar(source);
-                inline for (info.fields) |field| {
-                    if (field.type == void and std.mem.eql(u8, field.name, s.value)) return @unionInit(T, field.name, {});
+                inline for (info.field_names, info.field_types) |name, F| {
+                    if (F == void and std.mem.eql(u8, name, s.value)) return @unionInit(T, name, {});
                 }
                 return error.UnknownField;
             }
             try expect(source, .mapping_start);
             const key = try nextScalar(source);
-            inline for (info.fields) |field| {
-                if (std.mem.eql(u8, field.name, key.value)) {
-                    const result = @unionInit(T, field.name, try innerParse(field.type, allocator, source, options));
+            inline for (info.field_names, info.field_types) |name, F| {
+                if (std.mem.eql(u8, name, key.value)) {
+                    const result = @unionInit(T, name, try innerParse(F, allocator, source, options));
                     try expect(source, .mapping_end);
                     return result;
                 }
@@ -308,9 +308,9 @@ pub fn innerParse(comptime T: type, allocator: Allocator, source: anytype, optio
             if (info.is_tuple) {
                 try expect(source, .sequence_start);
                 var r: T = undefined;
-                inline for (0..info.fields.len) |i| {
+                inline for (info.field_types, 0..) |F, i| {
                     if (try source.peekNextEventType() == .sequence_end) return error.LengthMismatch;
-                    r[i] = try innerParse(info.fields[i].type, allocator, source, options);
+                    r[i] = try innerParse(F, allocator, source, options);
                 }
                 if (try source.peekNextEventType() != .sequence_end) return error.LengthMismatch;
                 _ = try source.next();
@@ -318,7 +318,7 @@ pub fn innerParse(comptime T: type, allocator: Allocator, source: anytype, optio
             }
             try expect(source, .mapping_start);
             var r: T = undefined;
-            var seen = [_]bool{false} ** info.fields.len;
+            var seen: [info.field_names.len]bool = @splat(false);
             while (true) {
                 if (try source.peekNextEventType() == .mapping_end) {
                     _ = try source.next();
@@ -332,9 +332,9 @@ pub fn innerParse(comptime T: type, allocator: Allocator, source: anytype, optio
                     continue;
                 }
                 const key = try nextScalar(source);
-                const matched = inline for (info.fields, 0..) |field, i| {
-                    if (field.is_comptime) @compileError("comptime fields are not supported: " ++ @typeName(T) ++ "." ++ field.name);
-                    if (std.mem.eql(u8, field.name, key.value)) {
+                const matched = inline for (info.field_names, info.field_types, info.field_attrs, 0..) |name, F, attrs, i| {
+                    if (attrs.@"comptime") @compileError("comptime fields are not supported: " ++ @typeName(T) ++ "." ++ name);
+                    if (std.mem.eql(u8, name, key.value)) {
                         if (seen[i]) switch (options.duplicate_field_behavior) {
                             .use_first => {
                                 try source.skipValue();
@@ -343,7 +343,7 @@ pub fn innerParse(comptime T: type, allocator: Allocator, source: anytype, optio
                             .@"error" => return error.DuplicateField,
                             .use_last => {},
                         };
-                        @field(r, field.name) = try innerParse(field.type, allocator, source, options);
+                        @field(r, name) = try innerParse(F, allocator, source, options);
                         seen[i] = true;
                         break true;
                     }
@@ -399,7 +399,7 @@ pub fn innerParse(comptime T: type, allocator: Allocator, source: anytype, optio
                         if (sentinel != 0) @compileError("only a zero sentinel is supported for strings: " ++ @typeName(T));
                         return allocator.dupeZ(u8, s.value);
                     }
-                    if (info.is_const) return keepString(allocator, source, s.value, options);
+                    if (info.attrs.@"const") return keepString(allocator, source, s.value, options);
                     return allocator.dupe(u8, s.value);
                 }
                 try expect(source, .sequence_start);
@@ -425,10 +425,11 @@ fn enumFromText(comptime T: type, text: []const u8, options: ParseOptions) error
 }
 
 fn fillDefaults(comptime T: type, r: *T, seen: []const bool) error{MissingField}!void {
-    inline for (@typeInfo(T).@"struct".fields, 0..) |field, i| {
+    const info = @typeInfo(T).@"struct";
+    inline for (info.field_names, info.field_types, info.field_attrs, 0..) |name, F, attrs, i| {
         if (!seen[i]) {
-            if (field.defaultValue()) |default| {
-                @field(r, field.name) = default;
+            if (attrs.defaultValue(F)) |default| {
+                @field(r, name) = default;
             } else return error.MissingField;
         }
     }
@@ -487,8 +488,8 @@ pub fn innerParseFromValue(comptime T: type, allocator: Allocator, source: Value
             if (info.tag_type == null) @compileError("Unable to parse into untagged union '" ++ @typeName(T) ++ "'");
             switch (source) {
                 .string => |s| {
-                    inline for (info.fields) |field| {
-                        if (field.type == void and std.mem.eql(u8, field.name, s)) return @unionInit(T, field.name, {});
+                    inline for (info.field_names, info.field_types) |name, F| {
+                        if (F == void and std.mem.eql(u8, name, s)) return @unionInit(T, name, {});
                     }
                     return error.UnknownField;
                 },
@@ -496,9 +497,9 @@ pub fn innerParseFromValue(comptime T: type, allocator: Allocator, source: Value
                     if (m.count() != 1) return error.UnexpectedToken;
                     const key = m.keys()[0];
                     if (key != .string) return error.UnexpectedToken;
-                    inline for (info.fields) |field| {
-                        if (std.mem.eql(u8, field.name, key.string))
-                            return @unionInit(T, field.name, try innerParseFromValue(field.type, allocator, m.values()[0], options));
+                    inline for (info.field_names, info.field_types) |name, F| {
+                        if (std.mem.eql(u8, name, key.string))
+                            return @unionInit(T, name, try innerParseFromValue(F, allocator, m.values()[0], options));
                     }
                     return error.UnknownField;
                 },
@@ -510,23 +511,23 @@ pub fn innerParseFromValue(comptime T: type, allocator: Allocator, source: Value
             if (info.is_tuple) {
                 if (source != .sequence) return error.UnexpectedToken;
                 const items = source.sequence.items;
-                if (items.len != info.fields.len) return error.LengthMismatch;
+                if (items.len != info.field_types.len) return error.LengthMismatch;
                 var r: T = undefined;
-                inline for (0..info.fields.len) |i| {
-                    r[i] = try innerParseFromValue(info.fields[i].type, allocator, items[i], options);
+                inline for (info.field_types, 0..) |F, i| {
+                    r[i] = try innerParseFromValue(F, allocator, items[i], options);
                 }
                 return r;
             }
             if (source != .mapping) return error.UnexpectedToken;
             var r: T = undefined;
-            var seen = [_]bool{false} ** info.fields.len;
+            var seen: [info.field_names.len]bool = @splat(false);
             var it = source.mapping.iterator();
             while (it.next()) |entry| {
                 const key = entry.key_ptr.*;
-                const matched = key == .string and inline for (info.fields, 0..) |field, i| {
-                    if (field.is_comptime) @compileError("comptime fields are not supported: " ++ @typeName(T) ++ "." ++ field.name);
-                    if (std.mem.eql(u8, field.name, key.string)) {
-                        @field(r, field.name) = try innerParseFromValue(field.type, allocator, entry.value_ptr.*, options);
+                const matched = key == .string and inline for (info.field_names, info.field_types, info.field_attrs, 0..) |name, F, attrs, i| {
+                    if (attrs.@"comptime") @compileError("comptime fields are not supported: " ++ @typeName(T) ++ "." ++ name);
+                    if (std.mem.eql(u8, name, key.string)) {
+                        @field(r, name) = try innerParseFromValue(F, allocator, entry.value_ptr.*, options);
                         seen[i] = true;
                         break true;
                     }

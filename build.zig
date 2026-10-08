@@ -16,7 +16,10 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run the unit tests and the yaml-test-suite");
     const check_step = b.step("check", "Compile everything without running it");
 
-    const unit_tests = b.addTest(.{ .root_module = mod });
+    // LLVM rather than the self-hosted backend, which emits no coverage
+    // instrumentation and no debug info kcov can use: without it
+    // `zig build fuzz --fuzz` fuzzes blind and a coverage report is empty.
+    const unit_tests = b.addTest(.{ .root_module = mod, .use_llvm = true });
     test_step.dependOn(&b.addRunArtifact(unit_tests).step);
     check_step.dependOn(&unit_tests.step);
 
@@ -48,11 +51,12 @@ pub fn build(b: *std.Build) void {
     const fuzz_tests = b.addTest(.{
         .root_module = fuzz_mod,
         .filters = if (fuzz_filter) |f| &.{f} else &.{},
+        .use_llvm = true,
     });
     test_step.dependOn(&b.addRunArtifact(fuzz_tests).step);
 
-    // `zig build fuzz --fuzz` is Zig's own fuzzer, which on 0.16.0 has no
-    // coverage feedback; `fuzz-run` is the loop in tools/fuzz.zig instead.
+    // `zig build fuzz --fuzz` is Zig's own coverage-guided fuzzer;
+    // `fuzz-run` is the loop in tools/fuzz.zig, seeded from the test suite.
     const fuzz_step = b.step("fuzz", "The fuzz targets: add --fuzz to fuzz them");
     fuzz_step.dependOn(&b.addRunArtifact(fuzz_tests).step);
 
@@ -88,11 +92,11 @@ pub fn build(b: *std.Build) void {
         run_fuzz.addArg("--corpus");
         run_fuzz.addDirectoryArg(suite.path("."));
     }
-    if (b.args) |args| run_fuzz.addArgs(args);
+    run_fuzz.addPassthruArgs();
 
     if (b.lazyDependency("yaml_test_suite", .{})) |suite| {
         const options = b.addOptions();
-        options.addOptionPath("suite_dir", suite.path("."));
+        options.addOptionPathDirectory("suite_dir", suite.path("."));
         options.addOption([]const u8, "suite_filter", suite_filter);
         const suite_mod = b.createModule(.{
             .root_source_file = b.path("tests/suite.zig"),
@@ -130,7 +134,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_events = b.addRunArtifact(events_exe);
     run_events.stdio = .inherit;
-    if (b.args) |args| run_events.addArgs(args);
+    run_events.addPassthruArgs();
     const events_step = b.step("events", "Print the events a YAML file parses to");
     events_step.dependOn(&run_events.step);
     check_step.dependOn(&events_exe.step);
@@ -167,8 +171,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const run_docs_server = b.addRunArtifact(docs_server);
-    run_docs_server.step.dependOn(&install_docs.step);
-    run_docs_server.addArg(b.getInstallPath(.prefix, "docs"));
+    run_docs_server.addDirectoryArg(library.getEmittedDocs());
     run_docs_server.addArg(b.fmt("{d}", .{docs_port}));
     // It runs until interrupted, so its output has to reach the terminal
     // rather than being captured by the build runner.
