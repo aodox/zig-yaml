@@ -19,6 +19,8 @@ const chars = @import("chars.zig");
 const Parser = @import("Parser.zig");
 const Error = Parser.Error;
 
+const gt = @import("test_helpers.zig");
+
 /// [202] l-document-prefix ::= c-byte-order-mark? l-comment*
 fn lDocumentPrefix(p: *Parser) void {
     _ = p.eatStr(chars.bom_utf8);
@@ -184,6 +186,16 @@ pub fn lYamlStream(p: *Parser) Error!bool {
     if (!p.atEnd()) return false;
     try p.emit(.{ .kind = .stream_end, .pos = p.pos });
     return true;
+}
+
+test lYamlStream {
+    try gt.expectEvents("a\n--- b\n...\n", lYamlStream, .{}, "+STR +DOC =VAL :a -DOC +DOC --- =VAL :b -DOC ... -STR");
+    try gt.expectEvents("# only a comment\n", lYamlStream, .{}, "+STR -STR");
+    // Not matching is not undone here: the events so far are left for the
+    // caller, which fails the whole parse.
+    var r = try gt.run("a: [b\n", lYamlStream, .{});
+    defer r.deinit();
+    try std.testing.expect(!r.matched);
 }
 
 test forbiddenLimit {

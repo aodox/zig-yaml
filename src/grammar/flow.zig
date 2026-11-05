@@ -19,6 +19,8 @@ const Parser = @import("Parser.zig");
 const Context = Parser.Context;
 const Error = Parser.Error;
 
+const gt = @import("test_helpers.zig");
+
 // -- [104]–[106] alias and empty nodes ---------------------------------------
 
 /// [104] c-ns-alias-node ::= c-alias ns-anchor-name
@@ -32,6 +34,14 @@ pub fn cNsAliasNode(p: *Parser) Error!bool {
     }
     try p.emit(.{ .kind = .alias, .pos = start, .value = p.inputSpan(name_start, p.pos) });
     return true;
+}
+
+test cNsAliasNode {
+    var r = try gt.run("*a ]", cNsAliasNode, .{});
+    defer r.deinit();
+    try std.testing.expectEqualStrings(" ]", r.rest());
+    try r.expectEvents("=ALI *a");
+    try gt.expectNoMatch("* a", cNsAliasNode, .{});
 }
 
 // [105] e-scalar ::= ""  and  [106] e-node ::= e-scalar  are
@@ -100,6 +110,15 @@ pub fn cDoubleQuoted(p: *Parser, n: i32, c: Context) Error!bool {
     if (!p.eat('"')) return p.fail(s);
     try p.emitScalar(start, .double_quoted, from, p.input[start + 1 .. p.pos - 1]);
     return true;
+}
+
+test cDoubleQuoted {
+    try gt.expectEvents("\"a\\x41\\n\"", cDoubleQuoted, .{ 0, .flow_out }, "=VAL \"aA\\n");
+    // A line break between words folds to a space.
+    try gt.expectEvents("\"a\n  b\"", cDoubleQuoted, .{ 0, .flow_out }, "=VAL \"a b");
+    // An escaped line break joins the lines with nothing between them.
+    try gt.expectEvents("\"a\\\n  b\"", cDoubleQuoted, .{ 0, .flow_out }, "=VAL \"ab");
+    try gt.expectNoMatch("\"open", cDoubleQuoted, .{ 0, .flow_out });
 }
 
 /// [111] nb-double-one-line ::= nb-double-char*
@@ -203,6 +222,12 @@ pub fn cSingleQuoted(p: *Parser, n: i32, c: Context) Error!bool {
     if (!p.eat('\'')) return p.fail(s);
     try p.emitScalar(start, .single_quoted, from, p.input[start + 1 .. p.pos - 1]);
     return true;
+}
+
+test cSingleQuoted {
+    try gt.expectEvents("'it''s'", cSingleQuoted, .{ 0, .flow_out }, "=VAL 'it's");
+    try gt.expectEvents("'a\n\n  b'", cSingleQuoted, .{ 0, .flow_out }, "=VAL 'a\\nb");
+    try gt.expectNoMatch("'open", cSingleQuoted, .{ 0, .flow_out });
 }
 
 /// [123] nb-ns-single-in-line ::= ( s-white* ns-single-char )*
@@ -345,12 +370,34 @@ pub fn nsPlain(p: *Parser, n: i32, c: Context) Error!bool {
     return true;
 }
 
+test nsPlain {
+    // In a key, a plain scalar ends at `: `...
+    var key = try gt.run("a b: c", nsPlain, .{ 0, .block_key });
+    defer key.deinit();
+    try std.testing.expectEqualStrings(": c", key.rest());
+    try key.expectEvents("=VAL :a b");
+    // ...in a flow collection at `,`...
+    var entry = try gt.run("a, b", nsPlain, .{ 0, .flow_in });
+    defer entry.deinit();
+    try std.testing.expectEqualStrings(", b", entry.rest());
+    // ...and outside both it may run on over lines, folded.
+    try gt.expectEvents("a\n b", nsPlain, .{ 0, .flow_out }, "=VAL :a b");
+    try gt.expectNoMatch("- ", nsPlain, .{ 0, .flow_out });
+}
+
 // -- [136]–[139] flow sequences ----------------------------------------------
 
 /// [137] c-flow-sequence(n,c) ::= c-sequence-start s-separate(n,c)? in-flow(n,c)? c-sequence-end
 pub fn cFlowSequence(p: *Parser, n: i32, c: Context) Error!bool {
     if (!p.peekIs('[')) return false;
     return p.memoized(.flow_sequence, cFlowSequenceUnmemoized, n, c);
+}
+
+test cFlowSequence {
+    try gt.expectEvents("[a, [b]]", cFlowSequence, .{ 0, .flow_out }, "+SEQ [] =VAL :a +SEQ [] =VAL :b -SEQ -SEQ");
+    // An entry that is a single key and value is a one-pair mapping.
+    try gt.expectEvents("[a: b]", cFlowSequence, .{ 0, .flow_out }, "+SEQ [] +MAP {} =VAL :a =VAL :b -MAP -SEQ");
+    try gt.expectNoMatch("[a", cFlowSequence, .{ 0, .flow_out });
 }
 
 fn cFlowSequenceUnmemoized(p: *Parser, n: i32, c: Context) Error!bool {
@@ -391,6 +438,12 @@ fn nsFlowSeqEntry(p: *Parser, n: i32, c: Context) Error!bool {
 pub fn cFlowMapping(p: *Parser, n: i32, c: Context) Error!bool {
     if (!p.peekIs('{')) return false;
     return p.memoized(.flow_mapping, cFlowMappingUnmemoized, n, c);
+}
+
+test cFlowMapping {
+    try gt.expectEvents("{a: 1, b}", cFlowMapping, .{ 0, .flow_out }, "+MAP {} =VAL :a =VAL :1 =VAL :b =VAL : -MAP");
+    try gt.expectEvents("{? [x]: y}", cFlowMapping, .{ 0, .flow_out }, "+MAP {} +SEQ [] =VAL :x -SEQ =VAL :y -MAP");
+    try gt.expectNoMatch("{a: 1", cFlowMapping, .{ 0, .flow_out });
 }
 
 fn cFlowMappingUnmemoized(p: *Parser, n: i32, c: Context) Error!bool {
@@ -589,10 +642,25 @@ pub fn nsSImplicitYamlKey(p: *Parser, c: Context) Error!bool {
     return implicitKey(p, c, nsFlowYamlNode);
 }
 
+test nsSImplicitYamlKey {
+    var r = try gt.run("a b : x", nsSImplicitYamlKey, .{.block_key});
+    defer r.deinit();
+    try std.testing.expectEqualStrings(": x", r.rest());
+    try r.expectEvents("=VAL :a b");
+}
+
 /// [155] c-s-implicit-json-key(c) ::= c-flow-json-node(0,c) s-separate-in-line?
 ///       /* At most 1024 characters altogether */
 pub fn cSImplicitJsonKey(p: *Parser, c: Context) Error!bool {
     return implicitKey(p, c, cFlowJsonNode);
+}
+
+test cSImplicitJsonKey {
+    var r = try gt.run("[a] : x", cSImplicitJsonKey, .{.block_key});
+    defer r.deinit();
+    try std.testing.expectEqualStrings(": x", r.rest());
+    try r.expectEvents("+SEQ [] =VAL :a -SEQ");
+    try gt.expectNoMatch("a: x", cSImplicitJsonKey, .{.block_key});
 }
 
 // -- [156]–[161] flow nodes --------------------------------------------------
@@ -640,6 +708,13 @@ pub fn nsFlowYamlNode(p: *Parser, n: i32, c: Context) Error!bool {
     return true;
 }
 
+test nsFlowYamlNode {
+    try gt.expectEvents("&x a", nsFlowYamlNode, .{ 0, .flow_out }, "=VAL &x :a");
+    try gt.expectEvents("*x", nsFlowYamlNode, .{ 0, .flow_out }, "=ALI *x");
+    // Properties with nothing after them make an empty scalar.
+    try gt.expectEvents("!!str", nsFlowYamlNode, .{ 0, .flow_out }, "=VAL <tag:yaml.org,2002:str> :");
+}
+
 /// [160] c-flow-json-node(n,c) ::= ( c-ns-properties(n,c) s-separate(n,c) )? c-flow-json-content(n,c)
 pub fn cFlowJsonNode(p: *Parser, n: i32, c: Context) Error!bool {
     const s = p.save();
@@ -648,6 +723,12 @@ pub fn cFlowJsonNode(p: *Parser, n: i32, c: Context) Error!bool {
     }
     if (try cFlowJsonContent(p, n, c)) return true;
     return p.fail(s);
+}
+
+test cFlowJsonNode {
+    try gt.expectEvents("&x [a]", cFlowJsonNode, .{ 0, .flow_out }, "+SEQ [] &x =VAL :a -SEQ");
+    try gt.expectEvents("\"a\"", cFlowJsonNode, .{ 0, .flow_out }, "=VAL \"a");
+    try gt.expectNoMatch("a", cFlowJsonNode, .{ 0, .flow_out });
 }
 
 /// [161] ns-flow-node(n,c) ::=
@@ -663,4 +744,11 @@ pub fn nsFlowNode(p: *Parser, n: i32, c: Context) Error!bool {
     p.restore(s);
     try p.emitEmpty();
     return true;
+}
+
+test nsFlowNode {
+    try gt.expectEvents("'a'", nsFlowNode, .{ 0, .flow_out }, "=VAL 'a");
+    try gt.expectEvents("*a", nsFlowNode, .{ 0, .flow_out }, "=ALI *a");
+    try gt.expectEvents("!t {}", nsFlowNode, .{ 0, .flow_out }, "+MAP {} <!t> -MAP");
+    try gt.expectNoMatch("]", nsFlowNode, .{ 0, .flow_out });
 }

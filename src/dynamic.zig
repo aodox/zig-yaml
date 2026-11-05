@@ -39,13 +39,25 @@ pub const Value = union(enum) {
 
     /// Hashes and compares values by content, for `Mapping`.
     pub const HashContext = struct {
+        /// `hash64`, truncated to the width an array hash map keeps.
         pub fn hash(_: HashContext, v: Value) u32 {
             return @truncate(v.hash64());
         }
+
+        /// `Value.eql`.
         pub fn eql(_: HashContext, a: Value, b: Value, _: usize) bool {
             return a.eql(b);
         }
     };
+
+    // One test for both methods: a `test eql` inside `HashContext` would be
+    // ambiguous with `Value.eql`, which Zig rejects.
+    test HashContext {
+        const ctx: HashContext = .{};
+        try std.testing.expectEqual(ctx.hash(.{ .float = 0.0 }), ctx.hash(.{ .float = -0.0 }));
+        try std.testing.expect(ctx.eql(.{ .float = 0.0 }, .{ .float = -0.0 }, 0));
+        try std.testing.expect(!ctx.eql(.{ .integer = 1 }, .{ .float = 1 }, 0));
+    }
 
     /// Looks up a string key without making a `Value` of it.
     const StringAdapter = struct {
@@ -64,10 +76,21 @@ pub const Value = union(enum) {
         h.update(s);
     }
 
+    /// A hash of the content, consistent with `eql`: values that are equal
+    /// hash alike, whatever order a mapping's entries are in.
     pub fn hash64(v: Value) u64 {
         var h: std.hash.Wyhash = .init(0);
         v.hashInto(&h);
         return h.final();
+    }
+
+    test hash64 {
+        const gpa = std.testing.allocator;
+        const a = try static.parseFromSlice(Value, gpa, "{x: 1, y: 2}", .{});
+        defer a.deinit();
+        const b = try static.parseFromSlice(Value, gpa, "{y: 2, x: 1}", .{});
+        defer b.deinit();
+        try std.testing.expectEqual(a.value.hash64(), b.value.hash64());
     }
 
     fn hashInto(v: Value, h: *std.hash.Wyhash) void {
@@ -126,6 +149,13 @@ pub const Value = union(enum) {
         };
     }
 
+    test eql {
+        const nan: Value = .{ .float = std.math.nan(f64) };
+        try std.testing.expect(nan.eql(nan));
+        // A different kind of value is a different value, whatever its text.
+        try std.testing.expect(!(Value{ .integer = 12 }).eql(.{ .string = "12" }));
+    }
+
     /// The value of the string key `key` of a mapping, or null if the value
     /// is not a mapping or has no such key.
     pub fn get(v: Value, key: []const u8) ?Value {
@@ -133,6 +163,18 @@ pub const Value = union(enum) {
         return v.mapping.getAdapted(key, StringAdapter{});
     }
 
+    test get {
+        const parsed = try static.parseFromSlice(Value, std.testing.allocator, "port: 80\n1: one\n", .{});
+        defer parsed.deinit();
+        try std.testing.expectEqual(80, parsed.value.get("port").?.integer);
+        // The key `1` is an integer, so no string finds it.
+        try std.testing.expectEqual(null, parsed.value.get("1"));
+    }
+
+    /// The hook `innerParse` calls to read a node into a `Value`: scalars
+    /// are resolved by their tag, or when untagged and plain by
+    /// `options.schema`, and aliases have already been expanded by the
+    /// source.
     pub fn yamlParse(allocator: Allocator, source: anytype, options: ParseOptions) ParseError(@TypeOf(source.*))!Value {
         return switch (try source.next()) {
             .scalar => |s| scalarValue(allocator, source, s, options),
@@ -166,12 +208,33 @@ pub const Value = union(enum) {
         };
     }
 
+    test yamlParse {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var scanner: @import("Scanner.zig") = .initCompleteInput(arena.allocator(), "[1, \"1\"]");
+        _ = try scanner.next(); // stream_start
+        _ = try scanner.next(); // document_start
+        const v = try yamlParse(arena.allocator(), &scanner, .{ .allocate = .alloc_if_needed });
+        try std.testing.expectEqual(1, v.sequence.items[0].integer);
+        try std.testing.expectEqualStrings("1", v.sequence.items[1].string);
+    }
+
+    /// The hook `innerParseFromValue` calls to read a `Value` into a
+    /// `Value`, which is the value itself, not a copy.
     pub fn yamlParseFromValue(allocator: Allocator, source: Value, options: ParseOptions) !Value {
         _ = allocator;
         _ = options;
         return source;
     }
 
+    test yamlParseFromValue {
+        const v: Value = .{ .string = "same" };
+        const out = try yamlParseFromValue(std.testing.allocator, v, .{});
+        try std.testing.expectEqual(v.string.ptr, out.string.ptr);
+    }
+
+    /// The hook `Stringify.write` calls to write a `Value`. A `number_string`
+    /// is written as the number it was.
     pub fn yamlStringify(v: Value, yw: *Stringify) Stringify.Error!void {
         switch (v) {
             .null => try yw.write(null),
@@ -197,13 +260,32 @@ pub const Value = union(enum) {
         }
     }
 
-    /// Writes the value to stderr as YAML, for debugging.
+    test yamlStringify {
+        const parsed = try static.parseFromSlice(Value, std.testing.allocator, "big: 123456789012345678901234567890\n", .{});
+        defer parsed.deinit();
+        const out = try Stringify.valueAlloc(std.testing.allocator, parsed.value, .{});
+        defer std.testing.allocator.free(out);
+        try std.testing.expectEqualStrings("big: 123456789012345678901234567890\n", out);
+    }
+
+    /// Writes the value to stderr as YAML, for debugging. Errors writing are
+    /// ignored.
     pub fn dump(v: Value) void {
         var buffer: [4096]u8 = undefined;
         const stderr = std.debug.lockStderr(&buffer);
         defer std.debug.unlockStderr();
         Stringify.value(v, .{}, &stderr.file_writer.interface) catch return;
         stderr.file_writer.interface.flush() catch {};
+    }
+
+    test dump {
+        // Compiled but not run: a test's stderr is the build runner's, and
+        // anything written there is reported as though something were wrong.
+        // What it writes is `Stringify.value`'s output, tested there.
+        // The condition is runtime-known so that the call is still analyzed.
+        var run = false;
+        _ = &run;
+        if (run) dump(.{ .sequence = .empty });
     }
 };
 

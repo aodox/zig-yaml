@@ -14,6 +14,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+/// A decoded code point and the number of bytes it took.
 pub const Cp = struct { cp: u21, len: u3 };
 
 /// Decodes the code point at the start of `bytes`, or null if it is not
@@ -28,7 +29,15 @@ pub fn decode(bytes: []const u8) ?Cp {
     return .{ .cp = cp, .len = @intCast(len) };
 }
 
-/// Decodes the code point that ends `bytes`.
+test decode {
+    try std.testing.expectEqual(Cp{ .cp = 'a', .len = 1 }, decode("ab").?);
+    try std.testing.expectEqual(Cp{ .cp = 0x20AC, .len = 3 }, decode("€").?);
+    try std.testing.expectEqual(null, decode("\xE2\x82")); // cut short
+    try std.testing.expectEqual(null, decode(""));
+}
+
+/// Decodes the code point that ends `bytes`, or null if `bytes` does not
+/// end with a whole, valid UTF-8 sequence.
 pub fn decodeLast(bytes: []const u8) ?u21 {
     if (bytes.len == 0) return null;
     var i = bytes.len - 1;
@@ -52,6 +61,13 @@ pub fn isStartOfLine(input: []const u8, pos: usize) bool {
     return false;
 }
 
+test isStartOfLine {
+    try std.testing.expect(isStartOfLine("a\nb", 0));
+    try std.testing.expect(!isStartOfLine("a\nb", 1));
+    try std.testing.expect(isStartOfLine("a\nb", 2));
+    try std.testing.expect(isStartOfLine(bom_utf8 ++ "a", 3));
+}
+
 pub const bom_utf8 = "\xEF\xBB\xBF";
 
 /// [1] c-printable
@@ -63,9 +79,22 @@ pub fn isPrintable(c: u21) bool {
     };
 }
 
+test isPrintable {
+    try std.testing.expect(isPrintable('\t'));
+    try std.testing.expect(isPrintable(0x1F600));
+    try std.testing.expect(!isPrintable(0x07));
+    try std.testing.expect(!isPrintable(0xFFFE));
+}
+
 /// [2] nb-json
 pub fn isNbJson(c: u21) bool {
     return c == 0x09 or c >= 0x20;
+}
+
+test isNbJson {
+    try std.testing.expect(isNbJson('\t'));
+    try std.testing.expect(isNbJson(0x07) == false);
+    try std.testing.expect(isNbJson(0xFFFE));
 }
 
 /// [3] c-byte-order-mark
@@ -79,6 +108,12 @@ pub fn isIndicator(c: u21) bool {
     };
 }
 
+test isIndicator {
+    try std.testing.expect(isIndicator('&'));
+    try std.testing.expect(isIndicator('`'));
+    try std.testing.expect(!isIndicator('a'));
+}
+
 /// [23] c-flow-indicator
 pub fn isFlowIndicator(c: u21) bool {
     return switch (c) {
@@ -87,9 +122,19 @@ pub fn isFlowIndicator(c: u21) bool {
     };
 }
 
+test isFlowIndicator {
+    try std.testing.expect(isFlowIndicator(','));
+    try std.testing.expect(!isFlowIndicator(':'));
+}
+
 /// [26] b-char
 pub fn isBreak(c: u21) bool {
     return c == '\n' or c == '\r';
+}
+
+test isBreak {
+    try std.testing.expect(isBreak('\r'));
+    try std.testing.expect(!isBreak(0x85)); // NEL is not a line break in YAML 1.2
 }
 
 /// [27] nb-char
@@ -97,9 +142,20 @@ pub fn isNbChar(c: u21) bool {
     return isPrintable(c) and !isBreak(c) and c != byte_order_mark;
 }
 
+test isNbChar {
+    try std.testing.expect(isNbChar(' '));
+    try std.testing.expect(!isNbChar('\n'));
+    try std.testing.expect(!isNbChar(byte_order_mark));
+}
+
 /// [33] s-white
 pub fn isWhite(c: u21) bool {
     return c == ' ' or c == '\t';
+}
+
+test isWhite {
+    try std.testing.expect(isWhite('\t'));
+    try std.testing.expect(!isWhite(0xA0));
 }
 
 /// [34] ns-char
@@ -107,9 +163,20 @@ pub fn isNsChar(c: u21) bool {
     return isNbChar(c) and !isWhite(c);
 }
 
+test isNsChar {
+    try std.testing.expect(isNsChar('x'));
+    try std.testing.expect(!isNsChar(' '));
+    try std.testing.expect(!isNsChar('\n'));
+}
+
 /// [35] ns-dec-digit
 pub fn isDecDigit(c: u21) bool {
     return c >= '0' and c <= '9';
+}
+
+test isDecDigit {
+    try std.testing.expect(isDecDigit('7'));
+    try std.testing.expect(!isDecDigit('a'));
 }
 
 /// [36] ns-hex-digit
@@ -117,14 +184,30 @@ pub fn isHexDigit(c: u21) bool {
     return isDecDigit(c) or (c >= 'A' and c <= 'F') or (c >= 'a' and c <= 'f');
 }
 
+test isHexDigit {
+    try std.testing.expect(isHexDigit('f'));
+    try std.testing.expect(isHexDigit('F'));
+    try std.testing.expect(!isHexDigit('g'));
+}
+
 /// [37] ns-ascii-letter
 pub fn isAsciiLetter(c: u21) bool {
     return (c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z');
 }
 
+test isAsciiLetter {
+    try std.testing.expect(isAsciiLetter('Z'));
+    try std.testing.expect(!isAsciiLetter('é'));
+}
+
 /// [38] ns-word-char
 pub fn isWordChar(c: u21) bool {
     return isDecDigit(c) or isAsciiLetter(c) or c == '-';
+}
+
+test isWordChar {
+    try std.testing.expect(isWordChar('-'));
+    try std.testing.expect(!isWordChar('_'));
 }
 
 /// [39] ns-uri-char, less its `'%' ns-hex-digit{2}` alternative, which spans
@@ -137,14 +220,31 @@ pub fn isUriCharSingle(c: u21) bool {
     };
 }
 
+test isUriCharSingle {
+    try std.testing.expect(isUriCharSingle('/'));
+    try std.testing.expect(!isUriCharSingle('%')); // only as part of an escape
+    try std.testing.expect(!isUriCharSingle('<'));
+}
+
 /// [40] ns-tag-char, likewise less the percent escape.
 pub fn isTagCharSingle(c: u21) bool {
     return isUriCharSingle(c) and c != '!' and !isFlowIndicator(c);
 }
 
+test isTagCharSingle {
+    try std.testing.expect(isTagCharSingle(':'));
+    try std.testing.expect(!isTagCharSingle('!'));
+    try std.testing.expect(!isTagCharSingle(','));
+}
+
 /// [102] ns-anchor-char
 pub fn isAnchorChar(c: u21) bool {
     return isNsChar(c) and !isFlowIndicator(c);
+}
+
+test isAnchorChar {
+    try std.testing.expect(isAnchorChar(':'));
+    try std.testing.expect(!isAnchorChar(']'));
 }
 
 /// [41]–[62] c-ns-esc-char, less the leading backslash: what the escape
@@ -154,6 +254,8 @@ pub const Escape = union(enum) {
     hex: u4,
 };
 
+/// What the escape `\c` stands for in a double-quoted scalar, or null if
+/// there is no such escape.
 pub fn escape(c: u8) ?Escape {
     return switch (c) {
         '0' => .{ .char = 0x00 }, // [42] ns-esc-null
@@ -180,6 +282,13 @@ pub fn escape(c: u8) ?Escape {
     };
 }
 
+test escape {
+    try std.testing.expectEqual(Escape{ .char = '\n' }, escape('n').?);
+    try std.testing.expectEqual(Escape{ .hex = 4 }, escape('u').?);
+    try std.testing.expectEqual(null, escape('q'));
+}
+
+/// The value of a hexadecimal digit, or null if `c` is not one.
 pub fn hexValue(c: u8) ?u8 {
     return switch (c) {
         '0'...'9' => c - '0',
@@ -189,8 +298,14 @@ pub fn hexValue(c: u8) ?u8 {
     };
 }
 
+test hexValue {
+    try std.testing.expectEqual(11, hexValue('b'));
+    try std.testing.expectEqual(null, hexValue('g'));
+}
+
 // -- §5.2 character encodings -----------------------------------------------
 
+/// The encodings §5.2 allows a stream to be in.
 pub const Encoding = enum { utf8, utf16le, utf16be, utf32le, utf32be };
 
 /// Detects the encoding of a stream from its first bytes, by the table in

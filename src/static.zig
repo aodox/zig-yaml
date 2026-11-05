@@ -68,10 +68,13 @@ pub const ParseOptions = struct {
     schema: Schema = .core,
 
     /// The deepest nesting of collections accepted, bounding the recursion
-    /// both of the grammar and of the parse into types.
+    /// both of the grammar and of the parse into types. Applied by the
+    /// `…FromSlice` functions; a `Scanner` or `Reader` handed to a
+    /// `…FromTokenSource` function keeps its own `max_depth`.
     max_depth: u32 = 512,
 
-    /// The most events aliases may expand to across a stream.
+    /// The most events aliases may expand to across a stream. Applied as
+    /// `max_depth` is.
     max_alias_expansion: usize = 1 << 20,
 
     /// What to do with a tag this library does not know. Ignoring it parses
@@ -101,16 +104,27 @@ pub const ParseFromValueError = schema_mod.IntError || Allocator.Error || error{
     MultipleDocuments,
 };
 
+/// The errors parsing from a `Source` — a `Scanner` or a `Reader` — can
+/// return: those of `ParseFromValueError`, and those of reading the source.
 pub fn ParseError(comptime Source: type) type {
     return ParseFromValueError || Source.NextError || Source.PeekError || Source.AllocError;
 }
 
-/// A value and the arena everything it points to was allocated in.
+test ParseError {
+    // Both what the scanner reports and what the target type rejects.
+    const result: ParseError(Scanner)!Parsed(u8) = parseFromSlice(u8, std.testing.allocator, "[", .{});
+    try std.testing.expectError(error.SyntaxError, result);
+    try std.testing.expectError(error.Overflow, parseFromSlice(u8, std.testing.allocator, "256", .{}));
+}
+
+/// A value and the arena everything it points to was allocated in. `deinit`
+/// frees the arena, and with it the value.
 pub fn Parsed(comptime T: type) type {
     return struct {
         arena: *ArenaAllocator,
         value: T,
 
+        /// Frees the value and everything it points to.
         pub fn deinit(self: @This()) void {
             const allocator = self.arena.child_allocator;
             self.arena.deinit();
@@ -119,18 +133,34 @@ pub fn Parsed(comptime T: type) type {
     };
 }
 
+test Parsed {
+    const parsed: Parsed([]const u8) = try parseFromSlice([]const u8, std.testing.allocator, "\"text\"", .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("text", parsed.value);
+}
+
 fn configure(scanner: *Scanner, options: ParseOptions) void {
     scanner.max_depth = options.max_depth;
     scanner.max_alias_expansion = options.max_alias_expansion;
 }
 
 /// Parses a stream holding one document (or none, which reads as a null
-/// node) into a `T`.
+/// node) into a `T`. A second document is `error.MultipleDocuments`;
+/// `parseAllFromSlice` takes them all. Strings may point into `s`, as
+/// `ParseOptions.allocate` describes, so `s` must outlive the result.
 pub fn parseFromSlice(comptime T: type, gpa: Allocator, s: []const u8, options: ParseOptions) ParseError(Scanner)!Parsed(T) {
     var scanner: Scanner = .initCompleteInput(gpa, s);
     defer scanner.deinit();
     configure(&scanner, options);
     return parseFromTokenSource(T, gpa, &scanner, options);
+}
+
+test parseFromSlice {
+    const Config = struct { name: []const u8, port: u16 = 8080 };
+    const parsed = try parseFromSlice(Config, std.testing.allocator, "name: web\n", .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("web", parsed.value.name);
+    try std.testing.expectEqual(8080, parsed.value.port);
 }
 
 /// As `parseFromSlice`, allocating into `allocator` with no arena of its own;
@@ -142,7 +172,15 @@ pub fn parseFromSliceLeaky(comptime T: type, allocator: Allocator, s: []const u8
     return parseFromTokenSourceLeaky(T, allocator, &scanner, options);
 }
 
-/// Parses every document of a stream, each into a `T`.
+test parseFromSliceLeaky {
+    var arena: ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const list = try parseFromSliceLeaky([]const u32, arena.allocator(), "[1, 2, 3]", .{});
+    try std.testing.expectEqualSlices(u32, &.{ 1, 2, 3 }, list);
+}
+
+/// Parses every document of a stream, each into a `T`. A stream with no
+/// documents gives an empty slice.
 pub fn parseAllFromSlice(comptime T: type, gpa: Allocator, s: []const u8, options: ParseOptions) ParseError(Scanner)!Parsed([]T) {
     var scanner: Scanner = .initCompleteInput(gpa, s);
     defer scanner.deinit();
@@ -150,6 +188,14 @@ pub fn parseAllFromSlice(comptime T: type, gpa: Allocator, s: []const u8, option
     return parseAllFromTokenSource(T, gpa, &scanner, options);
 }
 
+test parseAllFromSlice {
+    const parsed = try parseAllFromSlice(u8, std.testing.allocator, "1\n---\n2\n", .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2 }, parsed.value);
+}
+
+/// As `parseAllFromSlice`, allocating into `allocator` with no arena of its
+/// own; meant for an arena the caller manages.
 pub fn parseAllFromSliceLeaky(comptime T: type, allocator: Allocator, s: []const u8, options: ParseOptions) ParseError(Scanner)![]T {
     var scanner: Scanner = .initCompleteInput(allocator, s);
     defer scanner.deinit();
@@ -157,7 +203,17 @@ pub fn parseAllFromSliceLeaky(comptime T: type, allocator: Allocator, s: []const
     return parseAllFromTokenSourceLeaky(T, allocator, &scanner, options);
 }
 
-/// `source` is a `*Scanner` or a `*Reader`, which has not yet been read from.
+test parseAllFromSliceLeaky {
+    var arena: ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const docs = try parseAllFromSliceLeaky([]const u8, arena.allocator(), "--- a\n--- b\n", .{});
+    try std.testing.expectEqual(2, docs.len);
+    try std.testing.expectEqualStrings("b", docs[1]);
+}
+
+/// As `parseFromSlice`, from `source`: a `*Scanner` or a `*Reader` that has
+/// not yet been read from. The source's own `max_depth` and
+/// `max_alias_expansion` apply rather than those of `options`.
 pub fn parseFromTokenSource(comptime T: type, gpa: Allocator, source: anytype, options: ParseOptions) ParseError(@TypeOf(source.*))!Parsed(T) {
     var parsed: Parsed(T) = .{ .arena = try gpa.create(ArenaAllocator), .value = undefined };
     errdefer gpa.destroy(parsed.arena);
@@ -167,6 +223,17 @@ pub fn parseFromTokenSource(comptime T: type, gpa: Allocator, source: anytype, o
     return parsed;
 }
 
+test parseFromTokenSource {
+    var source: std.Io.Reader = .fixed("[x, y]");
+    var reader: @import("Reader.zig") = .init(std.testing.allocator, &source);
+    defer reader.deinit();
+    const parsed = try parseFromTokenSource([2][]const u8, std.testing.allocator, &reader, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("y", parsed.value[1]);
+}
+
+/// As `parseAllFromSlice`, from `source`: a `*Scanner` or a `*Reader` that
+/// has not yet been read from.
 pub fn parseAllFromTokenSource(comptime T: type, gpa: Allocator, source: anytype, options: ParseOptions) ParseError(@TypeOf(source.*))!Parsed([]T) {
     var parsed: Parsed([]T) = .{ .arena = try gpa.create(ArenaAllocator), .value = undefined };
     errdefer gpa.destroy(parsed.arena);
@@ -176,12 +243,22 @@ pub fn parseAllFromTokenSource(comptime T: type, gpa: Allocator, source: anytype
     return parsed;
 }
 
+test parseAllFromTokenSource {
+    var scanner: Scanner = .initCompleteInput(std.testing.allocator, "--- true\n--- false\n");
+    defer scanner.deinit();
+    const parsed = try parseAllFromTokenSource(bool, std.testing.allocator, &scanner, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualSlices(bool, &.{ true, false }, parsed.value);
+}
+
 fn withDefaults(comptime Source: type, options: ParseOptions) ParseOptions {
     var opts = options;
     if (opts.allocate == null) opts.allocate = if (Source == Scanner) .alloc_if_needed else .alloc_always;
     return opts;
 }
 
+/// As `parseFromTokenSource`, allocating into `allocator` with no arena of
+/// its own; meant for an arena the caller manages.
 pub fn parseFromTokenSourceLeaky(comptime T: type, allocator: Allocator, source: anytype, options: ParseOptions) ParseError(@TypeOf(source.*))!T {
     const opts = withDefaults(@TypeOf(source.*), options);
     try expect(source, .stream_start);
@@ -195,6 +272,16 @@ pub fn parseFromTokenSourceLeaky(comptime T: type, allocator: Allocator, source:
     return value;
 }
 
+test parseFromTokenSourceLeaky {
+    var arena: ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var scanner: Scanner = .initCompleteInput(arena.allocator(), "1.5");
+    const f = try parseFromTokenSourceLeaky(f32, arena.allocator(), &scanner, .{});
+    try std.testing.expectEqual(1.5, f);
+}
+
+/// As `parseAllFromTokenSource`, allocating into `allocator` with no arena
+/// of its own; meant for an arena the caller manages.
 pub fn parseAllFromTokenSourceLeaky(comptime T: type, allocator: Allocator, source: anytype, options: ParseOptions) ParseError(@TypeOf(source.*))![]T {
     const opts = withDefaults(@TypeOf(source.*), options);
     try expect(source, .stream_start);
@@ -204,6 +291,14 @@ pub fn parseAllFromTokenSourceLeaky(comptime T: type, allocator: Allocator, sour
     }
     try expect(source, .stream_end);
     return values.toOwnedSlice(allocator);
+}
+
+test parseAllFromTokenSourceLeaky {
+    var arena: ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var scanner: Scanner = .initCompleteInput(arena.allocator(), "");
+    const none = try parseAllFromTokenSourceLeaky(u8, arena.allocator(), &scanner, .{});
+    try std.testing.expectEqual(0, none.len);
 }
 
 fn parseDocument(comptime T: type, allocator: Allocator, source: anytype, options: ParseOptions) ParseError(@TypeOf(source.*))!T {
@@ -234,10 +329,17 @@ fn typedSchema(options: ParseOptions) Schema {
 
 const null_tag = schema_mod.tag_prefix ++ "null";
 
-/// Whether a scalar is null: tagged `!!null`, or plain and spelled as a null.
+/// Whether a scalar is null: tagged `!!null`, or untagged, plain and
+/// spelled as a null in the schema typed parsing uses.
 pub fn isNullScalar(s: event.Scalar, options: ParseOptions) bool {
     if (s.tag) |tag| return std.mem.eql(u8, tag, null_tag);
     return s.style == .plain and schema_mod.isNull(typedSchema(options), s.value);
+}
+
+test isNullScalar {
+    try std.testing.expect(isNullScalar(.{ .value = "~", .style = .plain }, .{}));
+    try std.testing.expect(!isNullScalar(.{ .value = "~", .style = .single_quoted }, .{}));
+    try std.testing.expect(!isNullScalar(.{ .value = "~", .style = .plain }, .{ .schema = .json }));
 }
 
 fn keepString(allocator: Allocator, source: anytype, s: []const u8, options: ParseOptions) Allocator.Error![]const u8 {
@@ -245,9 +347,10 @@ fn keepString(allocator: Allocator, source: anytype, s: []const u8, options: Par
     return allocator.dupe(u8, s);
 }
 
-/// Parses the node the source is positioned at as a `T`. This is what a
-/// `yamlParse` function calls for the parts of itself it leaves to the
-/// defaults.
+/// Parses the node the source is positioned at as a `T`, consuming exactly
+/// that node. This is what a `yamlParse` function calls for the parts of
+/// itself it leaves to the defaults. Its `options.allocate` must already be
+/// set to keep strings in the input; null copies every one.
 pub fn innerParse(comptime T: type, allocator: Allocator, source: anytype, options: ParseOptions) ParseError(@TypeOf(source.*))!T {
     switch (@typeInfo(T)) {
         .bool => {
@@ -397,7 +500,7 @@ pub fn innerParse(comptime T: type, allocator: Allocator, source: anytype, optio
                     const s = try nextScalar(source);
                     if (info.sentinel()) |sentinel| {
                         if (sentinel != 0) @compileError("only a zero sentinel is supported for strings: " ++ @typeName(T));
-                        return allocator.dupeZ(u8, s.value);
+                        return allocator.dupeSentinel(u8, s.value, 0);
                     }
                     if (info.attrs.@"const") return keepString(allocator, source, s.value, options);
                     return allocator.dupe(u8, s.value);
@@ -415,6 +518,39 @@ pub fn innerParse(comptime T: type, allocator: Allocator, source: anytype, optio
         },
         else => @compileError("Unable to parse into type '" ++ @typeName(T) ++ "'"),
     }
+}
+
+test innerParse {
+    // A point written as `x,y`, parsed through a hook that leaves the
+    // splitting of the text to itself and the numbers to `innerParse`.
+    const Point = struct {
+        x: i32,
+        y: i32,
+
+        pub fn yamlParse(allocator: Allocator, source: anytype, options: ParseOptions) !@This() {
+            const text = try innerParse([]const u8, allocator, source, options);
+            const comma = std.mem.findScalar(u8, text, ',') orelse return error.UnexpectedToken;
+            const parse = std.fmt.parseInt;
+            return .{
+                .x = parse(i32, text[0..comma], 10) catch return error.InvalidNumber,
+                .y = parse(i32, text[comma + 1 ..], 10) catch return error.InvalidNumber,
+            };
+        }
+    };
+    const parsed = try parseFromSlice([]const Point, std.testing.allocator, "[\"1,2\", \"3,4\"]", .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(4, parsed.value[1].y);
+}
+
+test "strings with a sentinel" {
+    var arena: ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const from_events = try parseFromSliceLeaky([:0]const u8, a, "text", .{});
+    try std.testing.expectEqualStrings("text", from_events);
+    const from_value = try parseFromValueLeaky([:0]const u8, a, .{ .string = "text" }, .{});
+    try std.testing.expectEqualStrings("text", from_value);
+    try std.testing.expectEqual(0, from_value[from_value.len]);
 }
 
 fn enumFromText(comptime T: type, text: []const u8, options: ParseOptions) error{InvalidEnumTag}!T {
@@ -436,7 +572,8 @@ fn fillDefaults(comptime T: type, r: *T, seen: []const bool) error{MissingField}
 }
 
 /// Parses a `Value` already in hand as a `T`, by the same rules as parsing
-/// from events.
+/// from events. Strings are copied, so the result does not depend on
+/// `source` once this returns.
 pub fn parseFromValue(comptime T: type, gpa: Allocator, source: Value, options: ParseOptions) ParseFromValueError!Parsed(T) {
     var parsed: Parsed(T) = .{ .arena = try gpa.create(ArenaAllocator), .value = undefined };
     errdefer gpa.destroy(parsed.arena);
@@ -446,11 +583,33 @@ pub fn parseFromValue(comptime T: type, gpa: Allocator, source: Value, options: 
     return parsed;
 }
 
+test parseFromValue {
+    const tree = try parseFromSlice(Value, std.testing.allocator, "kind: circle\nradius: 1.5\n", .{});
+    defer tree.deinit();
+    const Circle = struct { radius: f64 };
+    // Look at the tree first, then parse the part of it that is understood.
+    try std.testing.expectEqualStrings("circle", tree.value.get("kind").?.string);
+    const circle = try parseFromValue(Circle, std.testing.allocator, tree.value, .{ .ignore_unknown_fields = true });
+    defer circle.deinit();
+    try std.testing.expectEqual(1.5, circle.value.radius);
+}
+
+/// As `parseFromValue`, allocating into `allocator` with no arena of its
+/// own; meant for an arena the caller manages.
 pub fn parseFromValueLeaky(comptime T: type, allocator: Allocator, source: Value, options: ParseOptions) ParseFromValueError!T {
     return innerParseFromValue(T, allocator, source, options);
 }
 
-/// The counterpart of `innerParse` for a `Value`.
+test parseFromValueLeaky {
+    var arena: ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const n = try parseFromValueLeaky(u8, arena.allocator(), .{ .string = "0x1F" }, .{});
+    try std.testing.expectEqual(31, n);
+}
+
+/// The counterpart of `innerParse` for a `Value`: what a
+/// `yamlParseFromValue` function calls for the parts of itself it leaves to
+/// the defaults.
 pub fn innerParseFromValue(comptime T: type, allocator: Allocator, source: Value, options: ParseOptions) ParseFromValueError!T {
     switch (@typeInfo(T)) {
         .bool => return switch (source) {
@@ -571,7 +730,7 @@ pub fn innerParseFromValue(comptime T: type, allocator: Allocator, source: Value
                     if (info.child != u8) return error.UnexpectedToken;
                     if (info.sentinel()) |sentinel| {
                         if (sentinel != 0) @compileError("only a zero sentinel is supported for strings: " ++ @typeName(T));
-                        return allocator.dupeZ(u8, s);
+                        return allocator.dupeSentinel(u8, s, 0);
                     }
                     return allocator.dupe(u8, s);
                 },
@@ -589,4 +748,24 @@ pub fn innerParseFromValue(comptime T: type, allocator: Allocator, source: Value
         },
         else => @compileError("Unable to parse into type '" ++ @typeName(T) ++ "'"),
     }
+}
+
+test innerParseFromValue {
+    // A temperature written either as a number or as `<n>C`.
+    const Celsius = struct {
+        degrees: f32,
+
+        pub fn yamlParseFromValue(allocator: Allocator, source: Value, options: ParseOptions) !@This() {
+            if (source == .string and std.mem.endsWith(u8, source.string, "C")) {
+                const text = source.string[0 .. source.string.len - 1];
+                return .{ .degrees = try innerParseFromValue(f32, allocator, .{ .string = text }, options) };
+            }
+            return .{ .degrees = try innerParseFromValue(f32, allocator, source, options) };
+        }
+    };
+    var arena: ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqual(21.5, (try innerParseFromValue(Celsius, a, .{ .string = "21.5C" }, .{})).degrees);
+    try std.testing.expectEqual(20, (try innerParseFromValue(Celsius, a, .{ .integer = 20 }, .{})).degrees);
 }

@@ -39,6 +39,12 @@ pub fn tagKind(tag: []const u8) ?Kind {
     return map.get(name);
 }
 
+test tagKind {
+    try std.testing.expectEqual(.int, tagKind("tag:yaml.org,2002:int"));
+    try std.testing.expectEqual(null, tagKind("tag:yaml.org,2002:map"));
+    try std.testing.expectEqual(null, tagKind("!local"));
+}
+
 /// Resolves an untagged plain scalar. Null means the JSON schema has no
 /// resolution for it, which that schema makes an error.
 pub fn resolvePlain(schema: Schema, text: []const u8) ?Kind {
@@ -80,12 +86,26 @@ pub fn isCoreNull(text: []const u8) bool {
     return false;
 }
 
+test isCoreNull {
+    try std.testing.expect(isCoreNull(""));
+    try std.testing.expect(isCoreNull("~"));
+    try std.testing.expect(!isCoreNull("nULL"));
+}
+
+/// Whether `text` is spelled as a null in `schema`; never, in the failsafe
+/// schema.
 pub fn isNull(schema: Schema, text: []const u8) bool {
     return switch (schema) {
         .failsafe => false,
         .json => isJsonNull(text),
         .core => isCoreNull(text),
     };
+}
+
+test isNull {
+    try std.testing.expect(isNull(.core, "~"));
+    try std.testing.expect(!isNull(.json, "~"));
+    try std.testing.expect(!isNull(.failsafe, "null"));
 }
 
 // -- bool --------------------------------------------------------------------
@@ -99,11 +119,25 @@ pub fn parseCoreBool(text: []const u8) ?bool {
     return map.get(text);
 }
 
+test parseCoreBool {
+    try std.testing.expectEqual(true, parseCoreBool("True"));
+    try std.testing.expectEqual(null, parseCoreBool("yes"));
+}
+
+/// The boolean `text` spells, or null if it spells none. The failsafe
+/// schema reads them as the core schema does, for typed parsing, which has
+/// the target type to say a boolean is wanted.
 pub fn parseBool(schema: Schema, text: []const u8) ?bool {
     return switch (schema) {
         .json => if (std.mem.eql(u8, text, "true")) true else if (std.mem.eql(u8, text, "false")) false else null,
         .failsafe, .core => parseCoreBool(text),
     };
+}
+
+test parseBool {
+    try std.testing.expectEqual(false, parseBool(.core, "FALSE"));
+    try std.testing.expectEqual(null, parseBool(.json, "FALSE"));
+    try std.testing.expectEqual(true, parseBool(.failsafe, "true"));
 }
 
 // -- int ---------------------------------------------------------------------
@@ -133,11 +167,19 @@ pub fn isCoreInt(text: []const u8) bool {
     return allDigits(digits, std.ascii.isDigit);
 }
 
+test isCoreInt {
+    try std.testing.expect(isCoreInt("+12"));
+    try std.testing.expect(isCoreInt("0o17"));
+    try std.testing.expect(!isCoreInt("0b101"));
+    try std.testing.expect(!isCoreInt("-0x1F"));
+}
+
 pub const IntError = error{ InvalidNumber, Overflow };
 
 /// Parses an integer in any form the schema recognizes. Under the core
 /// schema that includes octal and hexadecimal, and — as `std.json` does for
-/// a JSON number — a float whose value happens to be whole.
+/// a JSON number — a float whose value happens to be whole. The failsafe
+/// schema reads numbers as the core schema does.
 pub fn parseInt(comptime T: type, schema: Schema, text: []const u8) IntError!T {
     const is_int = switch (schema) {
         .json => isJsonInt(text),
@@ -167,6 +209,12 @@ pub fn floatToInt(comptime T: type, f: anytype) IntError!T {
     const lo: f128 = @floatFromInt(std.math.minInt(T));
     if (x >= hi or x < lo) return error.Overflow;
     return @intFromFloat(x);
+}
+
+test floatToInt {
+    try std.testing.expectEqual(255, floatToInt(u8, @as(f64, 255.0)));
+    try std.testing.expectError(error.Overflow, floatToInt(u8, @as(f64, 256.0)));
+    try std.testing.expectError(error.InvalidNumber, floatToInt(u8, @as(f64, 1.5)));
 }
 
 fn mapIntError(e: std.fmt.ParseIntError) IntError {
@@ -233,7 +281,15 @@ pub fn isCoreFloat(text: []const u8) bool {
     return exponent(text, i);
 }
 
-/// Parses a float in any form the schema recognizes, integers included.
+test isCoreFloat {
+    try std.testing.expect(isCoreFloat(".5"));
+    try std.testing.expect(isCoreFloat("-.inf"));
+    try std.testing.expect(isCoreFloat("1e3"));
+    try std.testing.expect(!isCoreFloat("-.nan"));
+}
+
+/// Parses a float in any form the schema recognizes, integers included. The
+/// failsafe schema reads numbers as the core schema does.
 pub fn parseFloat(comptime T: type, schema: Schema, text: []const u8) error{InvalidNumber}!T {
     switch (schema) {
         .json => if (!isJsonFloat(text) and !isJsonInt(text)) return error.InvalidNumber,

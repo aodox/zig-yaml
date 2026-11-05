@@ -15,12 +15,20 @@ const Parser = @import("Parser.zig");
 const Context = Parser.Context;
 const Error = Parser.Error;
 
+const gt = @import("test_helpers.zig");
+
 // -- [28]–[30] line breaks ---------------------------------------------------
 
 /// [28] b-break ::= ( b-carriage-return b-line-feed ) | b-carriage-return | b-line-feed
 pub fn bBreak(p: *Parser) bool {
     if (p.eatStr("\r\n")) return true;
     return p.eat('\r') or p.eat('\n');
+}
+
+test bBreak {
+    try gt.expectMatch("\r\nx", bBreak, .{}, "x");
+    try gt.expectMatch("\rx", bBreak, .{}, "x");
+    try gt.expectNoMatch("x", bBreak, .{});
 }
 
 /// [29] b-as-line-feed ::= b-break
@@ -32,9 +40,24 @@ pub fn bAsLineFeed(p: *Parser) Error!bool {
     return true;
 }
 
+test bAsLineFeed {
+    var r = try gt.run("\r\nx", bAsLineFeed, .{});
+    defer r.deinit();
+    try std.testing.expectEqualStrings("\n", r.content());
+    try std.testing.expectEqualStrings("x", r.rest());
+}
+
 /// [30] b-non-content ::= b-break
 pub fn bNonContent(p: *Parser) bool {
     return bBreak(p);
+}
+
+test bNonContent {
+    var r = try gt.run("\nx", bNonContent, .{});
+    defer r.deinit();
+    try std.testing.expectEqualStrings("x", r.rest());
+    // Not content: nothing is added to the scalar.
+    try std.testing.expectEqualStrings("", r.content());
 }
 
 // -- [63]–[65] indentation ---------------------------------------------------
@@ -51,6 +74,14 @@ pub fn sIndent(p: *Parser, n: i32) bool {
     return true;
 }
 
+test sIndent {
+    try gt.expectMatch("   x", sIndent, .{2}, " x");
+    try gt.expectMatch("x", sIndent, .{0}, "x");
+    try gt.expectNoMatch("   x", sIndent, .{4});
+    // A tab is never indentation.
+    try gt.expectNoMatch("\tx", sIndent, .{1});
+}
+
 /// [64] s-indent-less-than(n) ::= s-space × m /* Where m < n */
 pub fn sIndentLessThan(p: *Parser, n: i32) bool {
     var i: i32 = 0;
@@ -58,11 +89,21 @@ pub fn sIndentLessThan(p: *Parser, n: i32) bool {
     return true;
 }
 
+test sIndentLessThan {
+    try gt.expectMatch("   x", sIndentLessThan, .{2}, "  x");
+    try gt.expectMatch("x", sIndentLessThan, .{2}, "x");
+}
+
 /// [65] s-indent-less-or-equal(n) ::= s-space × m /* Where m ≤ n */
 pub fn sIndentLessOrEqual(p: *Parser, n: i32) bool {
     var i: i32 = 0;
     while (i < n and p.eat(' ')) i += 1;
     return true;
+}
+
+test sIndentLessOrEqual {
+    try gt.expectMatch("   x", sIndentLessOrEqual, .{2}, " x");
+    try gt.expectMatch("x", sIndentLessOrEqual, .{2}, "x");
 }
 
 // -- [66]–[69] separation and line prefixes ----------------------------------
@@ -76,6 +117,16 @@ pub fn sSeparateInLine(p: *Parser) bool {
     return p.atStartOfLine();
 }
 
+test sSeparateInLine {
+    try gt.expectMatch(" \t x", sSeparateInLine, .{}, "x");
+    // Nothing at all, at the start of a line.
+    try gt.expectMatch("x", sSeparateInLine, .{}, "x");
+    var p = try Parser.init(std.testing.allocator, "ab");
+    defer p.deinit();
+    p.pos = 1;
+    try std.testing.expect(!sSeparateInLine(&p));
+}
+
 /// [67] s-line-prefix(n,c)
 pub fn sLinePrefix(p: *Parser, n: i32, c: Context) bool {
     return switch (c) {
@@ -84,9 +135,20 @@ pub fn sLinePrefix(p: *Parser, n: i32, c: Context) bool {
     };
 }
 
+test sLinePrefix {
+    try gt.expectMatch("   x", sLinePrefix, .{ 2, .block_in }, " x");
+    // A flow line prefix takes any whitespace after the indentation too.
+    try gt.expectMatch("   x", sLinePrefix, .{ 2, .flow_in }, "x");
+}
+
 /// [68] s-block-line-prefix(n) ::= s-indent(n)
 pub fn sBlockLinePrefix(p: *Parser, n: i32) bool {
     return sIndent(p, n);
+}
+
+test sBlockLinePrefix {
+    try gt.expectMatch("   x", sBlockLinePrefix, .{2}, " x");
+    try gt.expectNoMatch(" x", sBlockLinePrefix, .{2});
 }
 
 /// [69] s-flow-line-prefix(n) ::= s-indent(n) s-separate-in-line?
@@ -94,6 +156,11 @@ pub fn sFlowLinePrefix(p: *Parser, n: i32) bool {
     if (!sIndent(p, n)) return false;
     _ = sSeparateInLine(p);
     return true;
+}
+
+test sFlowLinePrefix {
+    try gt.expectMatch("  \t x", sFlowLinePrefix, .{2}, "x");
+    try gt.expectNoMatch("  x", sFlowLinePrefix, .{3});
 }
 
 // -- [70]–[74] empty lines and line folding ----------------------------------
@@ -114,6 +181,16 @@ pub fn lEmpty(p: *Parser, n: i32, c: Context) Error!bool {
     return p.fail(s);
 }
 
+test lEmpty {
+    var r = try gt.run("  \nx", lEmpty, .{ 2, .block_in });
+    defer r.deinit();
+    try std.testing.expectEqualStrings("\n", r.content());
+    try std.testing.expectEqualStrings("x", r.rest());
+    // Less indentation than the block's is still an empty line.
+    try gt.expectMatch("\nx", lEmpty, .{ 2, .block_in }, "x");
+    try gt.expectNoMatch("  a\n", lEmpty, .{ 2, .block_in });
+}
+
 /// `b-as-line-feed`, or the end of the input where it ends a line that has
 /// something on it — something consumed since `line`, so that the end of the
 /// input can end a line only once.
@@ -126,6 +203,18 @@ pub fn bAsLineFeedOrEnd(p: *Parser, line: u32) Error!bool {
     return false;
 }
 
+test bAsLineFeedOrEnd {
+    try gt.expectMatch("\nx", bAsLineFeedOrEnd, .{0}, "x");
+    var p = try Parser.init(std.testing.allocator, "ab");
+    defer p.deinit();
+    p.pos = 2;
+    // The end of the input ends a line with something on it...
+    try std.testing.expect(try bAsLineFeedOrEnd(&p, 0));
+    try std.testing.expectEqualStrings("\n", p.scratch.items);
+    // ...but only once.
+    try std.testing.expect(!try bAsLineFeedOrEnd(&p, 2));
+}
+
 /// [71] b-l-trimmed(n,c) ::= b-non-content l-empty(n,c)+
 pub fn bLTrimmed(p: *Parser, n: i32, c: Context) Error!bool {
     const s = p.save();
@@ -135,6 +224,15 @@ pub fn bLTrimmed(p: *Parser, n: i32, c: Context) Error!bool {
     return true;
 }
 
+test bLTrimmed {
+    var r = try gt.run("\n\nx", bLTrimmed, .{ 0, .flow_in });
+    defer r.deinit();
+    // The first break is dropped; the empty line after it is kept.
+    try std.testing.expectEqualStrings("\n", r.content());
+    try std.testing.expectEqualStrings("x", r.rest());
+    try gt.expectNoMatch("\nx", bLTrimmed, .{ 0, .flow_in });
+}
+
 /// [72] b-as-space ::= b-break
 pub fn bAsSpace(p: *Parser) Error!bool {
     if (!bBreak(p)) return false;
@@ -142,9 +240,24 @@ pub fn bAsSpace(p: *Parser) Error!bool {
     return true;
 }
 
+test bAsSpace {
+    var r = try gt.run("\nx", bAsSpace, .{});
+    defer r.deinit();
+    try std.testing.expectEqualStrings(" ", r.content());
+}
+
 /// [73] b-l-folded(n,c) ::= b-l-trimmed(n,c) | b-as-space
 pub fn bLFolded(p: *Parser, n: i32, c: Context) Error!bool {
     return try bLTrimmed(p, n, c) or try bAsSpace(p);
+}
+
+test bLFolded {
+    var single = try gt.run("\nx", bLFolded, .{ 0, .flow_in });
+    defer single.deinit();
+    try std.testing.expectEqualStrings(" ", single.content());
+    var double = try gt.run("\n\nx", bLFolded, .{ 0, .flow_in });
+    defer double.deinit();
+    try std.testing.expectEqualStrings("\n", double.content());
 }
 
 /// [74] s-flow-folded(n) ::= s-separate-in-line? b-l-folded(n,FLOW-IN) s-flow-line-prefix(n)
@@ -153,6 +266,14 @@ pub fn sFlowFolded(p: *Parser, n: i32) Error!bool {
     _ = sSeparateInLine(p);
     if (try bLFolded(p, n, .flow_in) and sFlowLinePrefix(p, n)) return true;
     return p.fail(s);
+}
+
+test sFlowFolded {
+    var r = try gt.run(" \n  x", sFlowFolded, .{1});
+    defer r.deinit();
+    try std.testing.expectEqualStrings(" ", r.content());
+    try std.testing.expectEqualStrings("x", r.rest());
+    try gt.expectNoMatch(" x", sFlowFolded, .{1});
 }
 
 // -- [75]–[79] comments ------------------------------------------------------
@@ -164,9 +285,20 @@ pub fn cNbCommentText(p: *Parser) bool {
     return true;
 }
 
+test cNbCommentText {
+    try gt.expectMatch("# hi\nx", cNbCommentText, .{}, "\nx");
+    try gt.expectNoMatch("x", cNbCommentText, .{});
+}
+
 /// [76] b-comment ::= b-non-content | <end-of-input>
 pub fn bComment(p: *Parser) bool {
     return bNonContent(p) or p.atEnd();
+}
+
+test bComment {
+    try gt.expectMatch("\nx", bComment, .{}, "x");
+    try gt.expectMatch("", bComment, .{}, "");
+    try gt.expectNoMatch("x", bComment, .{});
 }
 
 /// [77] s-b-comment ::= ( s-separate-in-line c-nb-comment-text? )? b-comment
@@ -175,6 +307,12 @@ pub fn sBComment(p: *Parser) bool {
     if (sSeparateInLine(p)) _ = cNbCommentText(p);
     if (bComment(p)) return true;
     return p.fail(s);
+}
+
+test sBComment {
+    try gt.expectMatch("  # c\nx", sBComment, .{}, "x");
+    try gt.expectMatch("\nx", sBComment, .{}, "x");
+    try gt.expectNoMatch("  x", sBComment, .{});
 }
 
 /// [78] l-comment ::= s-separate-in-line c-nb-comment-text? b-comment
@@ -186,11 +324,22 @@ pub fn lComment(p: *Parser) bool {
     return p.fail(s);
 }
 
+test lComment {
+    try gt.expectMatch("  # c\nx", lComment, .{}, "x");
+    try gt.expectMatch("# c\n", lComment, .{}, "");
+    try gt.expectNoMatch("x", lComment, .{});
+}
+
 /// [79] s-l-comments ::= ( s-b-comment | <start-of-line> ) l-comment*
 pub fn sLComments(p: *Parser) bool {
     if (!sBComment(p) and !p.atStartOfLine()) return false;
     lComments(p);
     return true;
+}
+
+test sLComments {
+    try gt.expectMatch(" # a\n# b\n\nx", sLComments, .{}, "x");
+    try gt.expectMatch("x", sLComments, .{}, "x");
 }
 
 /// `l-comment*`. Guarded against the zero-width match `l-comment` makes at
@@ -200,6 +349,12 @@ pub fn lComments(p: *Parser) void {
         const before = p.pos;
         if (!lComment(p) or p.pos == before) break;
     }
+}
+
+test lComments {
+    try gt.expectMatch("# a\n  # b\nx", lComments, .{}, "x");
+    // Ends rather than matching nothing forever at the end of the input.
+    try gt.expectMatch("# a", lComments, .{}, "");
 }
 
 // -- [80]–[81] separation lines ----------------------------------------------
@@ -212,12 +367,23 @@ pub fn sSeparate(p: *Parser, n: i32, c: Context) bool {
     };
 }
 
+test sSeparate {
+    // In a key, separation cannot cross a line.
+    try gt.expectMatch(" \nx", sSeparate, .{ 0, .block_key }, "\nx");
+    try gt.expectMatch(" # c\n x", sSeparate, .{ 0, .flow_in }, "x");
+}
+
 /// [81] s-separate-lines(n) ::= ( s-l-comments s-flow-line-prefix(n) ) | s-separate-in-line
 pub fn sSeparateLines(p: *Parser, n: i32) bool {
     const s = p.save();
     if (sLComments(p) and sFlowLinePrefix(p, n)) return true;
     p.restore(s);
     return sSeparateInLine(p);
+}
+
+test sSeparateLines {
+    try gt.expectMatch("\n  x", sSeparateLines, .{2}, "x");
+    try gt.expectMatch(" x", sSeparateLines, .{2}, "x");
 }
 
 // -- [82]–[95] directives ----------------------------------------------------
@@ -229,6 +395,15 @@ pub fn lDirective(p: *Parser) Error!bool {
     const matched = try nsYamlDirective(p) or try nsTagDirective(p) or nsReservedDirective(p);
     if (matched and sLComments(p)) return true;
     return p.fail(s);
+}
+
+test lDirective {
+    var r = try gt.run("%YAML 1.2 # c\n---", lDirective, .{});
+    defer r.deinit();
+    try std.testing.expectEqualStrings("---", r.rest());
+    try std.testing.expectEqualStrings("1.2", r.p.slice(r.p.yaml_version));
+    try gt.expectMatch("%FOO bar baz\n", lDirective, .{}, "");
+    try gt.expectNoMatch("--- x", lDirective, .{});
 }
 
 /// [83] ns-reserved-directive ::= ns-directive-name ( s-separate-in-line ns-directive-parameter )*
@@ -250,6 +425,11 @@ pub fn nsReservedDirective(p: *Parser) bool {
         break;
     }
     return true;
+}
+
+test nsReservedDirective {
+    try gt.expectMatch("FOO bar baz\n", nsReservedDirective, .{}, "\n");
+    try gt.expectNoMatch("YAML 1.2", nsReservedDirective, .{});
 }
 
 /// [84] ns-directive-name ::= ns-char+
@@ -277,6 +457,16 @@ pub fn nsYamlDirective(p: *Parser) Error!bool {
     if (!p.yaml_version.isNone()) return error.DuplicateDirective;
     p.yaml_version = p.inputSpan(start, p.pos);
     return true;
+}
+
+test nsYamlDirective {
+    try gt.expectMatch("YAML 1.2 # c", nsYamlDirective, .{}, " # c");
+    try gt.expectNoMatch("YAML 1.2x", nsYamlDirective, .{});
+    var p = try Parser.init(std.testing.allocator, "YAML 1.2");
+    defer p.deinit();
+    try std.testing.expect(try nsYamlDirective(&p));
+    p.pos = 0;
+    try std.testing.expectError(error.DuplicateDirective, nsYamlDirective(&p));
 }
 
 /// [87] ns-yaml-version ::= ns-dec-digit+ '.' ns-dec-digit+
@@ -310,9 +500,25 @@ pub fn nsTagDirective(p: *Parser) Error!bool {
     return true;
 }
 
+test nsTagDirective {
+    var r = try gt.run("TAG !e! tag:example.com,2000:\n", nsTagDirective, .{});
+    defer r.deinit();
+    try std.testing.expectEqualStrings("\n", r.rest());
+    try std.testing.expectEqualStrings("!e!", r.p.tag_handles.items[0].handle);
+    try std.testing.expectEqualStrings("tag:example.com,2000:", r.p.slice(r.p.tag_handles.items[0].prefix));
+    try gt.expectNoMatch("TAG !e!\n", nsTagDirective, .{});
+}
+
 /// [89] c-tag-handle ::= c-named-tag-handle | c-secondary-tag-handle | c-primary-tag-handle
 pub fn cTagHandle(p: *Parser) bool {
     return cNamedTagHandle(p) or p.eatStr("!!") or p.eat('!');
+}
+
+test cTagHandle {
+    try gt.expectMatch("!e!x", cTagHandle, .{}, "x");
+    try gt.expectMatch("!!str", cTagHandle, .{}, "str");
+    try gt.expectMatch("!x", cTagHandle, .{}, "x");
+    try gt.expectNoMatch("x", cTagHandle, .{});
 }
 
 /// [92] c-named-tag-handle ::= c-tag ns-word-char+ c-tag
@@ -343,9 +549,21 @@ pub fn nsUriChar(p: *Parser) bool {
     return percentEscape(p) or p.eatCp(chars.isUriCharSingle);
 }
 
+test nsUriChar {
+    try gt.expectMatch("%2Fx", nsUriChar, .{}, "x");
+    try gt.expectMatch("/x", nsUriChar, .{}, "x");
+    try gt.expectNoMatch("%zz", nsUriChar, .{});
+    try gt.expectNoMatch("<", nsUriChar, .{});
+}
+
 /// [40] ns-tag-char
 pub fn nsTagChar(p: *Parser) bool {
     return percentEscape(p) or p.eatCp(chars.isTagCharSingle);
+}
+
+test nsTagChar {
+    try gt.expectMatch("%21x", nsTagChar, .{}, "x");
+    try gt.expectNoMatch("!x", nsTagChar, .{});
 }
 
 /// The `'%' ns-hex-digit{2}` alternative of [39].
@@ -369,6 +587,15 @@ pub fn cNsProperties(p: *Parser, n: i32, c: Context) Error!bool {
     return cNsPropertiesUpTo(p, n, c, 2);
 }
 
+test cNsProperties {
+    var r = try gt.run("!!str &a x", cNsProperties, .{ 0, .block_in });
+    defer r.deinit();
+    try std.testing.expectEqualStrings(" x", r.rest());
+    try std.testing.expectEqualStrings("tag:yaml.org,2002:str", r.p.slice(r.p.props.tag));
+    try std.testing.expectEqualStrings("a", r.p.slice(r.p.props.anchor));
+    try gt.expectNoMatch("x", cNsProperties, .{ 0, .block_in });
+}
+
 /// `c-ns-properties` reading at most `count` properties. The second property
 /// may be on the next line, where it may instead belong to the first key of
 /// a mapping the first property is on — which a caller finds out only later,
@@ -385,6 +612,13 @@ pub fn cNsPropertiesUpTo(p: *Parser, n: i32, c: Context, count: u2) Error!bool {
         return true;
     }
     return false;
+}
+
+test cNsPropertiesUpTo {
+    var r = try gt.run("&a !t x", cNsPropertiesUpTo, .{ 0, .block_in, 1 });
+    defer r.deinit();
+    try std.testing.expectEqualStrings(" !t x", r.rest());
+    try std.testing.expect(r.p.props.tag.isNone());
 }
 
 /// [97] c-ns-tag-property ::= c-verbatim-tag | c-ns-shorthand-tag | c-non-specific-tag
@@ -424,6 +658,24 @@ pub fn cNsTagProperty(p: *Parser) Error!bool {
         return true;
     }
     return false;
+}
+
+test cNsTagProperty {
+    const tagOf = struct {
+        fn f(input: []const u8, expected: []const u8) !void {
+            var r = try gt.run(input, cNsTagProperty, .{});
+            defer r.deinit();
+            try std.testing.expect(r.matched);
+            try std.testing.expectEqualStrings(expected, r.p.slice(r.p.props.tag));
+        }
+    }.f;
+    try tagOf("!<tag:x> y", "tag:x");
+    try tagOf("!local y", "!local");
+    try tagOf("!!a%21 y", "tag:yaml.org,2002:a!");
+    try tagOf("! y", "!");
+    var p = try Parser.init(std.testing.allocator, "!e!x y");
+    defer p.deinit();
+    try std.testing.expectError(error.UndefinedTagHandle, cNsTagProperty(&p));
 }
 
 /// Resolves a tag shorthand against the document's `%TAG` directives and the
@@ -473,9 +725,23 @@ pub fn cNsAnchorProperty(p: *Parser) bool {
     return true;
 }
 
+test cNsAnchorProperty {
+    var r = try gt.run("&anchor x", cNsAnchorProperty, .{});
+    defer r.deinit();
+    try std.testing.expectEqualStrings(" x", r.rest());
+    try std.testing.expectEqualStrings("anchor", r.p.slice(r.p.props.anchor));
+    try gt.expectNoMatch("& x", cNsAnchorProperty, .{});
+}
+
 /// [103] ns-anchor-name ::= ns-anchor-char+
 pub fn nsAnchorName(p: *Parser) bool {
     if (!p.eatCp(chars.isAnchorChar)) return false;
     while (p.eatCp(chars.isAnchorChar)) {}
     return true;
+}
+
+test nsAnchorName {
+    // `:` may be in an anchor name; a flow indicator may not.
+    try gt.expectMatch("a:b, c", nsAnchorName, .{}, ", c");
+    try gt.expectNoMatch(" a", nsAnchorName, .{});
 }

@@ -19,6 +19,8 @@ const Chomping = Parser.Chomping;
 const Context = Parser.Context;
 const Error = Parser.Error;
 
+const gt = @import("test_helpers.zig");
+
 // -- [162]–[169] block scalar headers and chomping ---------------------------
 
 const Header = struct {
@@ -473,6 +475,13 @@ fn nsLCompactMapping(p: *Parser, n: i32) Error!bool {
 /// [196] s-l+block-node(n,c) ::= s-l+block-in-block(n,c) | s-l+flow-in-block(n)
 pub fn sLBlockNode(p: *Parser, n: i32, c: Context) Error!bool {
     return p.memoized(.block_node, sLBlockNodeUnmemoized, n, c);
+}
+
+test sLBlockNode {
+    try gt.expectEvents("- a\n- b: c\n", sLBlockNode, .{ -1, .block_in }, "+SEQ =VAL :a +MAP =VAL :b =VAL :c -MAP -SEQ");
+    try gt.expectEvents("|\n  text\n", sLBlockNode, .{ -1, .block_in }, "=VAL |text\\n");
+    // A block node may also be a flow node, alone on its lines.
+    try gt.expectEvents("[a]\n", sLBlockNode, .{ -1, .block_in }, "+SEQ [] =VAL :a -SEQ");
 }
 
 fn sLBlockNodeUnmemoized(p: *Parser, n: i32, c: Context) Error!bool {

@@ -91,23 +91,59 @@ documents: usize = 0,
 root_written: bool = false,
 in_document: bool = false,
 
+/// A write stream onto `writer`, for output built a node at a time. It
+/// does not flush `writer`.
 pub fn init(writer: *Writer, options: Options) Stringify {
     return .{ .writer = writer, .options = options };
 }
 
-/// Writes `v` as a YAML document.
+test init {
+    var buf: [64]u8 = undefined;
+    var w: Writer = .fixed(&buf);
+    var yw: Stringify = .init(&w, .{ .style = .flow });
+    try yw.beginSequence();
+    try yw.write(1);
+    try yw.write("two");
+    try yw.endSequence();
+    try yw.endDocument();
+    try std.testing.expectEqualStrings("[1, two]\n", w.buffered());
+}
+
+/// Writes `v` as a YAML document, ending with a line break. It does not
+/// flush `writer`.
 pub fn value(v: anytype, options: Options, writer: *Writer) Error!void {
     var s: Stringify = .init(writer, options);
     try s.write(v);
     try s.endDocument();
 }
 
-/// Writes `v` as a YAML document into a newly allocated buffer.
+test value {
+    var buf: [64]u8 = undefined;
+    var w: Writer = .fixed(&buf);
+    try value(.{ .name = "x", .ports = .{ 80, 443 } }, .{}, &w);
+    try std.testing.expectEqualStrings(
+        \\name: x
+        \\ports:
+        \\  - 80
+        \\  - 443
+        \\
+    , w.buffered());
+}
+
+/// Writes `v` as a YAML document into a newly allocated buffer, which the
+/// caller owns.
 pub fn valueAlloc(gpa: Allocator, v: anytype, options: Options) error{OutOfMemory}![]u8 {
     var out: Writer.Allocating = .init(gpa);
     defer out.deinit();
     value(v, options, &out.writer) catch return error.OutOfMemory;
     return out.toOwnedSlice();
+}
+
+test valueAlloc {
+    const out = try valueAlloc(std.testing.allocator, "true", .{});
+    defer std.testing.allocator.free(out);
+    // Quoted, since unquoted it would read back as a boolean.
+    try std.testing.expectEqualStrings("'true'\n", out);
 }
 
 // -- documents ---------------------------------------------------------------
@@ -126,10 +162,37 @@ pub fn beginDocument(self: *Stringify) Error!void {
     self.at_line_start = true;
 }
 
+test beginDocument {
+    var buf: [64]u8 = undefined;
+    var w: Writer = .fixed(&buf);
+    var yw: Stringify = .init(&w, .{});
+    try yw.beginDocument();
+    try yw.write(1);
+    try yw.beginDocument();
+    try yw.write(2);
+    try yw.endDocument();
+    try std.testing.expectEqualStrings("1\n---\n2\n", w.buffered());
+}
+
+/// Ends the current document. Every collection must have been ended first.
+/// The root node has already finished its line, so this writes nothing, and
+/// in particular no `...` marker; the next node written begins a new
+/// document after `---`.
 pub fn endDocument(self: *Stringify) Error!void {
     std.debug.assert(self.depth == 0);
     if (!self.at_line_start) try self.newline();
     self.in_document = false;
+}
+
+test endDocument {
+    var buf: [64]u8 = undefined;
+    var w: Writer = .fixed(&buf);
+    var yw: Stringify = .init(&w, .{});
+    try yw.write("first");
+    try yw.endDocument();
+    try yw.write("second");
+    try yw.endDocument();
+    try std.testing.expectEqualStrings("first\n---\nsecond\n", w.buffered());
 }
 
 // -- positioning -------------------------------------------------------------
@@ -300,26 +363,95 @@ fn endCollection(self: *Stringify, kind: @FieldType(Frame, "kind")) Error!void {
     try self.endNode();
 }
 
+/// Begins a sequence as the next node; its entries are the nodes written
+/// until `endSequence`.
 pub fn beginSequence(self: *Stringify) Error!void {
     return self.beginCollection(.sequence);
 }
 
+test beginSequence {
+    var buf: [64]u8 = undefined;
+    var w: Writer = .fixed(&buf);
+    var yw: Stringify = .init(&w, .{});
+    try yw.beginSequence();
+    try yw.write("a");
+    try yw.beginSequence();
+    try yw.write("b");
+    try yw.endSequence();
+    try yw.endSequence();
+    try yw.endDocument();
+    try std.testing.expectEqualStrings("- a\n- - b\n", w.buffered());
+}
+
+/// Ends the sequence begun last. An empty sequence is written `[]`.
 pub fn endSequence(self: *Stringify) Error!void {
     return self.endCollection(.sequence);
 }
 
+test endSequence {
+    var buf: [64]u8 = undefined;
+    var w: Writer = .fixed(&buf);
+    var yw: Stringify = .init(&w, .{});
+    try yw.beginSequence();
+    try yw.endSequence();
+    try yw.endDocument();
+    try std.testing.expectEqualStrings("[]\n", w.buffered());
+}
+
+/// Begins a mapping as the next node; its keys and values are the nodes
+/// written until `endMapping`, alternating.
 pub fn beginMapping(self: *Stringify) Error!void {
     return self.beginCollection(.mapping);
 }
 
+test beginMapping {
+    var buf: [64]u8 = undefined;
+    var w: Writer = .fixed(&buf);
+    var yw: Stringify = .init(&w, .{});
+    try yw.beginMapping();
+    try yw.write(1); // a key need not be a string
+    try yw.write("one");
+    try yw.endMapping();
+    try yw.endDocument();
+    try std.testing.expectEqualStrings("1: one\n", w.buffered());
+}
+
+/// Ends the mapping begun last, whose last key must have had its value
+/// written. An empty mapping is written `{}`.
 pub fn endMapping(self: *Stringify) Error!void {
     return self.endCollection(.mapping);
 }
 
-/// Writes a string key; the value is written next.
+test endMapping {
+    var buf: [64]u8 = undefined;
+    var w: Writer = .fixed(&buf);
+    var yw: Stringify = .init(&w, .{});
+    try yw.beginMapping();
+    try yw.mappingKey("empty");
+    try yw.beginMapping();
+    try yw.endMapping();
+    try yw.endMapping();
+    try yw.endDocument();
+    try std.testing.expectEqualStrings("empty: {}\n", w.buffered());
+}
+
+/// Writes a string key; the value is written next. It is the same as
+/// `write(key)`, except that it asserts a key is what is due.
 pub fn mappingKey(self: *Stringify, key: []const u8) Error!void {
     std.debug.assert(self.depth > 0 and self.top().kind == .mapping and !self.top().want_value);
     return self.writeString(key);
+}
+
+test mappingKey {
+    var buf: [64]u8 = undefined;
+    var w: Writer = .fixed(&buf);
+    var yw: Stringify = .init(&w, .{});
+    try yw.beginMapping();
+    try yw.mappingKey("a: b"); // quoted, since it would read as a mapping
+    try yw.write(null);
+    try yw.endMapping();
+    try yw.endDocument();
+    try std.testing.expectEqualStrings("'a: b': null\n", w.buffered());
 }
 
 // -- scalars -----------------------------------------------------------------
@@ -332,6 +464,18 @@ pub fn print(self: *Stringify, comptime fmt: []const u8, args: anytype) Error!vo
     try self.writer.print(fmt, args);
     self.at_line_start = false;
     try self.endNode();
+}
+
+test print {
+    var buf: [64]u8 = undefined;
+    var w: Writer = .fixed(&buf);
+    var yw: Stringify = .init(&w, .{});
+    try yw.beginMapping();
+    try yw.mappingKey("mode");
+    try yw.print("0o{o}", .{0o755});
+    try yw.endMapping();
+    try yw.endDocument();
+    try std.testing.expectEqualStrings("mode: 0o755\n", w.buffered());
 }
 
 fn writeRaw(self: *Stringify, text: []const u8) Error!void {
@@ -564,7 +708,12 @@ fn writeFloat(self: *Stringify, f: f64) Error!void {
 
 // -- values ------------------------------------------------------------------
 
-/// Writes any Zig value as a node.
+/// Writes any Zig value as a node, beginning a document if none is open.
+/// Structs are mappings and tuples, slices and arrays sequences; a tagged
+/// union is a single-pair mapping from its tag, or the bare tag for a
+/// `void` payload; enums and error names are strings; `[]const u8` is a
+/// string if it is valid UTF-8 and a sequence of numbers if not. A type
+/// with a `yamlStringify` method writes itself.
 pub fn write(self: *Stringify, v: anytype) Error!void {
     const T = @TypeOf(v);
     switch (@typeInfo(T)) {
@@ -643,6 +792,16 @@ pub fn write(self: *Stringify, v: anytype) Error!void {
         },
         else => @compileError("Unable to stringify type '" ++ @typeName(T) ++ "'"),
     }
+}
+
+test write {
+    const Shape = union(enum) { circle: f32, none };
+    var buf: [128]u8 = undefined;
+    var w: Writer = .fixed(&buf);
+    var yw: Stringify = .init(&w, .{ .style = .flow });
+    try yw.write(.{ .shapes = [_]Shape{ .{ .circle = 1.5 }, .none }, .bytes = @as([]const u8, "\xff") });
+    try yw.endDocument();
+    try std.testing.expectEqualStrings("{shapes: [{circle: 1.5}, none], bytes: [255]}\n", w.buffered());
 }
 
 fn expectOutput(expected: []const u8, v: anytype, options: Options) !void {

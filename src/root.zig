@@ -58,16 +58,20 @@ pub const innerParseFromValue = static.innerParseFromValue;
 
 pub const Stringify = @import("Stringify.zig");
 
-/// A formatter for `{f}` that writes `value` as a YAML document.
+/// A formatter for `{f}` that writes `value` as a YAML document, by the same
+/// rules as `Stringify.value`.
 pub fn fmt(value: anytype, options: Stringify.Options) Formatter(@TypeOf(value)) {
     return .{ .value = value, .options = options };
 }
 
+/// What `fmt` returns: a value of type `T` and the options to write it with,
+/// for `{f}` in a format string.
 pub fn Formatter(comptime T: type) type {
     return struct {
         value: T,
         options: Stringify.Options,
 
+        /// Writes the value as a YAML document; called by `{f}`.
         pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
             try Stringify.value(self.value, self.options, writer);
         }
@@ -85,6 +89,12 @@ test fmt {
     try std.testing.expectEqualStrings("a: 1\n", out);
 }
 
+test Formatter {
+    const f: Formatter(struct { a: u8 }) = .{ .value = .{ .a = 1 }, .options = .{ .style = .flow } };
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("{a: 1}\n", try std.fmt.bufPrint(&buf, "{f}", .{f}));
+}
+
 test {
     std.testing.refAllDecls(@This());
     _ = @import("grammar/chars.zig");
@@ -92,5 +102,6 @@ test {
     _ = @import("grammar/flow.zig");
     _ = @import("grammar/block.zig");
     _ = @import("grammar/stream.zig");
+    _ = @import("grammar/test_helpers.zig");
     _ = @import("tests.zig");
 }
