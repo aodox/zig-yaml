@@ -25,9 +25,15 @@ pub fn build(b: *std.Build) void {
 
     // -- conformance ---------------------------------------------------------
     //
-    // The yaml-test-suite is a lazy dependency: nothing in the library needs
-    // it, so a consumer of this package never fetches it, and here it is
-    // fetched only when a step that runs it is asked for.
+    // Zig 0.17 fetches a lazy dependency as soon as `lazyDependency` runs,
+    // including when a parent project builds this package. The suite is not
+    // part of the library. Windows also cannot unpack its symlinks
+    // (PRIVILEGE_NOT_HELD). Fetch only with `-Dyaml-suite`.
+    const fetch_suite = b.option(
+        bool,
+        "yaml-suite",
+        "Fetch yaml-test-suite for conformance and the fuzz corpus",
+    ) orelse false;
     const suite_filter = b.option(
         []const u8,
         "suite-filter",
@@ -87,14 +93,14 @@ pub fn build(b: *std.Build) void {
     fuzz_run_step.dependOn(&run_fuzz.step);
     check_step.dependOn(&fuzz_run.step);
 
-    if (b.lazyDependency("yaml_test_suite", .{})) |suite| {
+    if (fetch_suite) if (b.lazyDependency("yaml_test_suite", .{})) |suite| {
         // Every document in the suite seeds the fuzzer.
         run_fuzz.addArg("--corpus");
         run_fuzz.addDirectoryArg(suite.path("."));
-    }
+    };
     run_fuzz.addPassthruArgs();
 
-    if (b.lazyDependency("yaml_test_suite", .{})) |suite| {
+    if (fetch_suite) if (b.lazyDependency("yaml_test_suite", .{})) |suite| {
         const options = b.addOptions();
         options.addOptionPathDirectory("suite_dir", suite.path("."));
         options.addOption([]const u8, "suite_filter", suite_filter);
@@ -113,7 +119,7 @@ pub fn build(b: *std.Build) void {
         run_suite.has_side_effects = true;
         test_step.dependOn(&run_suite.step);
         check_step.dependOn(&suite_tests.step);
-    }
+    };
 
     // A small tool for looking at what the parser makes of a file, in the
     // test suite's event notation: `zig build events -- file.yaml`.
